@@ -392,7 +392,96 @@ def _parse_dividend_per_share(desc: str) -> float:
 
 
 # ============================================================
-# 4. 计算波动率（120日对数收益率年化）
+# 4. 获取分红稳定性数据（v6.10 新增）
+# ============================================================
+
+def get_dividend_years(code: str) -> int:
+    """
+    获取股票连续分红年数。
+
+    查询过去5年的分红方案，统计有分红记录的年份数。
+
+    返回：连续分红年数（1-5），如果没有分红记录返回0。
+    """
+    try:
+        now = datetime.now()
+        five_years_ago = now - timedelta(days=5*365)
+
+        # 查询分红方案
+        params = {
+            'reportName': 'RPT_LICO_FN_CPD',
+            'columns': 'SECURITY_CODE,ASSIGNDSCRPT,REPORTDATE',
+            'filter': f'(SECURITY_CODE="{code}")',
+            'pageNumber': 1,
+            'pageSize': 30,  # 5年足够
+            'sortTypes': -1,
+            'sortColumns': 'REPORTDATE',
+            'source': 'WEB',
+            'client': 'WEB',
+        }
+
+        r = requests.get(_EM_DC_URL, params=params, headers=_HEADERS, timeout=_TIMEOUT)
+        r.raise_for_status()
+        resp = r.json()
+
+        if not resp.get('success') or not resp.get('result'):
+            return 0
+
+        items = resp['result'].get('data', [])
+        if not items:
+            return 0
+
+        # 统计有分红的年份数
+        dividend_years = set()
+
+        for item in items:
+            report_date_str = item.get('REPORTDATE', '')[:10]
+            if not report_date_str:
+                continue
+
+            try:
+                report_date = datetime.strptime(report_date_str, '%Y-%m-%d')
+            except ValueError:
+                continue
+
+            # 只统计过去5年
+            if report_date < five_years_ago:
+                continue
+
+            # 检查是否有分红（包含"派"字样）
+            desc = item.get('ASSIGNDSCRPT', '')
+            if desc and '派' in str(desc):
+                dividend_years.add(report_date.year)
+
+        return len(dividend_years)
+
+    except Exception as e:
+        print(f"  分红年数获取失败 {code}: {e}")
+        return 0
+
+
+def get_dividend_years_batch(codes: list) -> dict:
+    """
+    批量获取股票连续分红年数。
+
+    返回：{code: dividend_years}
+    """
+    result = {}
+    total = len(codes)
+
+    for i, code in enumerate(codes):
+        years = get_dividend_years(code)
+        result[code] = years
+
+        if (i + 1) % 20 == 0:
+            print(f"  分红年数进度: {i + 1}/{total}")
+            time.sleep(0.3)  # 防限流
+
+    return result
+
+
+# ============================================================
+# 5. 计算波动率（120日对数收益率年化）
 # ============================================================
 
 def calculate_volatility(code: str, end_date: str = None) -> float:
@@ -452,17 +541,18 @@ def merge_all_data() -> pd.DataFrame:
     主流程：
     1. 分页拉全量行情（~55页）→ 股价、PE、PB、市值、行业
     2. 一次拉 EPS（~5200条）→ 基本每股收益
-    3. 客户端初筛（市值>=100亿 & EPS>0 & 非ST）
-    4. 对候选股自计算TTM股息率（v6.6新增）
-    5. 二次筛选（股息率>=4%）
-    6. 对候选股查分红方案（几十只）→ 股利支付率
-    7. 对候选股计算波动率 → 年化波动率
+    3. 客户端初筛（市值>=500亿 & EPS>0 & 非ST）
+    4. 对候选股自计算TTM股息率
+    5. 二次筛选（股息率>=3%）
+    6. 对候选股查分红方案 → 股利支付率
+    7. 对候选股计算分红年数 → 分红稳定性（v6.10新增）
+    8. 对候选股计算波动率 → 年化波动率
     """
-    print("步骤1/7: 获取全A股实时行情...")
+    print("步骤1/8: 获取全A股实时行情...")
     quotes = fetch_all_quotes()
     print(f"  获取 {len(quotes)} 只股票")
 
-    print("步骤2/7: 获取EPS...")
+    print("步骤2/8: 获取EPS...")
     eps_df = fetch_eps_batch()
     print(f"  获取 {len(eps_df)} 只股票的EPS")
 
@@ -477,7 +567,7 @@ def merge_all_data() -> pd.DataFrame:
         merged[col] = pd.to_numeric(merged[col], errors='coerce')
 
     pre_filtered = merged[
-        (merged['market_cap'] >= 500.0) &  # v6.8调整: 100.0 → 500.0
+        (merged['market_cap'] >= 500.0) &
         (merged['basic_eps'] > 0) &
         (merged['market_cap'].notna()) &
         (merged['basic_eps'].notna()) &
@@ -486,10 +576,10 @@ def merge_all_data() -> pd.DataFrame:
     ].copy()
 
     candidate_codes = pre_filtered['code'].tolist()
-    print(f"步骤3/7: 初筛后 {len(candidate_codes)} 只候选股（市值≥500亿、EPS>0、非ST）")
+    print(f"步骤3/8: 初筛后 {len(candidate_codes)} 只候选股（市值≥500亿、EPS>0、非ST）")
 
-    # v6.6新增：自计算TTM股息率
-    print("步骤4/7: 计算候选股TTM股息率（自计算,这需要几分钟）...")
+    # 自计算TTM股息率
+    print("步骤4/8: 计算候选股TTM股息率（自计算,这需要几分钟）...")
     prices = dict(zip(pre_filtered['code'], pre_filtered['price']))
     div_yields = calculate_ttm_dividend_batch(candidate_codes, prices)
     print(f"  完成 {len(div_yields)} 只股票的股息率计算")
@@ -501,17 +591,24 @@ def merge_all_data() -> pd.DataFrame:
     # 第二次筛选：股息率>=3%
     merged = merged[
         (merged['dividend_yield_ttm'].notna()) &
-        (merged['dividend_yield_ttm'] >= 3.0)  # v6.8调整: 4.0 → 3.0
+        (merged['dividend_yield_ttm'] >= 3.0)
     ].copy()
 
     candidate_codes = merged['code'].tolist()
-    print(f"步骤5/7: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥3%）")
+    print(f"步骤5/8: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥3%）")
 
-    print("步骤6/7: 获取候选股分红数据（计算股利支付率）...")
+    print("步骤6/8: 获取候选股分红数据（计算股利支付率）...")
     div_df = fetch_dividend_for_candidates(candidate_codes)
     merged = merged.merge(div_df, on='code', how='left')
 
-    print("步骤7/7: 计算候选股波动率（这需要几分钟）...")
+    # v6.10新增：获取分红年数
+    print("步骤7/8: 获取候选股分红年数（计算分红稳定性）...")
+    div_years = get_dividend_years_batch(candidate_codes)
+    print(f"  完成 {len(div_years)} 只股票的分红年数计算")
+    div_years_df = pd.DataFrame(list(div_years.items()), columns=['code', 'dividend_years'])
+    merged = merged.merge(div_years_df, on='code', how='left')
+
+    print("步骤8/8: 计算候选股波动率（这需要几分钟）...")
     vols = calculate_volatility_batch(candidate_codes)
     print(f"  完成 {len(vols)} 只股票的波动率计算")
 

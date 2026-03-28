@@ -64,7 +64,7 @@ def init_db():
     ''')
 
     # 兼容旧数据库：新增列
-    for col, col_type in [('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), ('market', 'TEXT'), ('pinyin_abbr', 'TEXT')]:
+    for col, col_type in [('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), ('market', 'TEXT'), ('pinyin_abbr', 'TEXT'), ('dividend_years', 'INTEGER')]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')
         except sqlite3.OperationalError:
@@ -232,7 +232,7 @@ def export():
     导出 Excel。
 
     文件名：红利低波_{data_date}_{count}只.xlsx
-    列（14列）：排名 | 代码 | 名称 | 行业 | 市场 | 股价 | PE | PB | 股息率(%) | 波动率(%) | 综合评分 | 总市值(亿) | 股利支付率(%) | EPS
+    列（15列）：排名 | 代码 | 名称 | 行业 | 市场 | 股价 | PE | PB | 股息率(%) | 总市值(亿) | 综合评分 | 波动率(%) | 股利支付率(%) | EPS | 分红年数
     """
     conn = get_db()
     conn.row_factory = sqlite3.Row
@@ -251,8 +251,8 @@ def export():
     ws = wb.active
     ws.title = '红利低波'
 
-    # 表头（14列）- v6.7调整顺序
-    headers = ['排名', '代码', '名称', '行业', '市场', '股价', 'PE', 'PB', '股息率(%)', '总市值(亿)', '综合评分', '波动率(%)', '股利支付率(%)', 'EPS']
+    # 表头（15列）- v6.10新增分红年数
+    headers = ['排名', '代码', '名称', '行业', '市场', '股价', 'PE', 'PB', '股息率(%)', '总市值(亿)', '综合评分', '波动率(%)', '股利支付率(%)', 'EPS', '分红年数']
     header_font = Font(bold=True)
     header_alignment = Alignment(horizontal='center')
 
@@ -261,7 +261,7 @@ def export():
         cell.font = header_font
         cell.alignment = header_alignment
 
-    # 数据行 - v6.7调整顺序
+    # 数据行
     for row_idx, s in enumerate(stocks, 2):
         ws.cell(row=row_idx, column=1, value=s.get('rank')).alignment = Alignment(horizontal='center')
         ws.cell(row=row_idx, column=2, value=s.get('code')).alignment = Alignment(horizontal='center')
@@ -277,12 +277,13 @@ def export():
         ws.cell(row=row_idx, column=12, value=s.get('annual_vol')).number_format = '0.00'
         ws.cell(row=row_idx, column=13, value=s.get('payout_ratio')).number_format = '0.00'
         ws.cell(row=row_idx, column=14, value=s.get('eps')).number_format = '0.00'
+        ws.cell(row=row_idx, column=15, value=s.get('dividend_years')).alignment = Alignment(horizontal='center')
 
     # 冻结首行
     ws.freeze_panes = 'A2'
 
     # 自动列宽
-    col_widths = [8, 12, 16, 12, 10, 10, 10, 10, 12, 12, 12, 14, 14, 10]
+    col_widths = [8, 12, 16, 12, 10, 10, 10, 10, 12, 12, 12, 12, 14, 10, 10]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 

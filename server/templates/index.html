@@ -79,6 +79,28 @@
         }
         .stale-warning.show { display: flex; }
 
+        /* ===== Model Info ===== */
+        .model-info {
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+        .model-info .model-title {
+            font-weight: 600;
+            color: var(--text);
+        }
+        .model-info .model-divider {
+            margin: 0 12px;
+            color: var(--border);
+        }
+        .model-info .model-detail {
+            color: #6e6e73;
+        }
+
         /* ===== Search & Filter ===== */
         .controls {
             display: flex; gap: 8px; margin-bottom: 12px;
@@ -219,6 +241,7 @@
         <div class="header-inner">
             <div class="logo">红利低波<span>跟踪系统</span></div>
             <div class="actions">
+                <button class="btn btn-secondary" onclick="resetFilters()">复原</button>
                 <button class="btn btn-primary" id="btnRun" onclick="runScan()">运行</button>
                 <button class="btn btn-secondary" id="btnExport" onclick="exportExcel()">导出</button>
             </div>
@@ -234,6 +257,14 @@
         <div class="stale-warning" id="staleWarning">
             ⚠️ 数据已超过7天未更新，建议点击「运行」获取最新数据
         </div>
+    </div>
+
+    <!-- 评分模型说明 -->
+    <div class="model-info" id="modelInfo" style="display:none;">
+        <span class="model-title">三因子评分模型：</span>
+        综合评分 = 股息率 × 50% + 波动率(反向) × 30% + 分红稳定性 × 20%
+        <span class="model-divider">|</span>
+        <span class="model-detail">分红稳定性：3年=60分、4年=80分、5年+=100分</span>
     </div>
 
     <!-- Empty State (首次使用) -->
@@ -253,12 +284,9 @@
 
     <!-- Table Section -->
     <div id="tableSection" style="display:none;">
-        <div class="controls">
+        <div class="controls" style="display: flex; gap: 8px; align-items: center;">
             <input type="text" class="search-input" id="searchInput"
-                   placeholder="搜索名称/代码/简拼..." oninput="debounceSearch()">
-            <button class="btn btn-secondary" onclick="resetFilters()">复原</button>
-        </div>
-        <div class="controls-row">
+                   placeholder="搜索名称/代码/简拼..." oninput="debounceSearch()" style="flex: 0 0 200px;">
             <select class="filter-select" id="industryFilter" onchange="loadStocks()">
                 <option value="">全部行业</option>
             </select>
@@ -329,6 +357,9 @@
                         <th class="num sortable" data-col="eps" onclick="handleSort('eps')">
                             EPS<span class="sort-arrow">↕</span>
                         </th>
+                        <th class="num sortable" data-col="dividend_years" onclick="handleSort('dividend_years')">
+                            分红年数<span class="sort-arrow">↕</span>
+                        </th>
                     </tr>
                 </thead>
                 <tbody id="stockBody"></tbody>
@@ -344,7 +375,7 @@
 </main>
 
 <footer>
-    © 2026 红利低波跟踪系统 v6.9 极简版
+    © 2026 红利低波跟踪系统 v6.10 极简版
 </footer>
 
 <!-- Toast -->
@@ -366,7 +397,7 @@
     // 数值列定义
     const NUMERIC_COLS = new Set([
         'rank', 'price', 'pe', 'pb', 'dividend_yield', 'annual_vol',
-        'composite_score', 'market_cap', 'payout_ratio', 'eps'
+        'composite_score', 'market_cap', 'payout_ratio', 'eps', 'dividend_years'
     ]);
 
     // ===== Init =====
@@ -413,6 +444,7 @@
         document.getElementById('loading').classList.remove('show');
         document.getElementById('tableSection').style.display = 'block';
         document.getElementById('infoBar').style.display = 'flex';
+        document.getElementById('modelInfo').style.display = 'block';
 
         // Meta info（使用 total 而非 filteredStocks.length）
         document.getElementById('totalCount').textContent = `共 ${data.total} 只标的`;
@@ -471,6 +503,7 @@
                 <td class="num">${s.annual_vol}</td>
                 <td class="num">${s.payout_ratio != null ? s.payout_ratio : '-'}</td>
                 <td class="num">${s.eps != null ? s.eps : '-'}</td>
+                <td class="num">${s.dividend_years != null ? s.dividend_years : '-'}</td>
             </tr>
         `).join('');
     }
@@ -554,6 +587,7 @@
         document.getElementById('tableSection').style.display = 'none';
         document.getElementById('loading').classList.remove('show');
         document.getElementById('infoBar').style.display = 'none';
+        document.getElementById('modelInfo').style.display = 'none';
         document.getElementById('emptyState').style.display = 'block';
     }
 

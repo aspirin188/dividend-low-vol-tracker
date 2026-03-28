@@ -32,6 +32,7 @@ MAX_DIVIDEND_YIELD = 30.0   # 股息率 ≤ 30%（异常数据过滤）
 MIN_MARKET_CAP = 500.0      # 总市值 ≥ 500 亿 (v6.8调整: 100.0 → 500.0)
 MAX_PAYOUT_RATIO = 150.0    # 股利支付率 ≤ 150%
 MIN_EPS = 0.0               # EPS > 0
+MIN_DIVIDEND_YEARS = 3      # 连续分红年数 ≥ 3年 (v6.10新增)
 
 
 # ============================================================
@@ -165,7 +166,7 @@ def get_pinyin_abbr(name: str) -> str:
 
 def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
     """
-    硬性筛选：股息率 ≥ 4%、市值 ≥ 100亿、支付率 ≤ 150%、EPS > 0、非ST、数据完整。
+    硬性筛选：股息率 ≥ 3%、市值 ≥ 500亿、支付率 ≤ 150%、EPS > 0、非ST、数据完整、连续分红≥3年。
 
     原则：宁可少，不可错。数据不全直接过滤。
     """
@@ -173,7 +174,7 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~df['name'].str.contains('ST', case=False, na=False)]
 
     # 确保关键字段为数值类型
-    num_cols = ['dividend_yield_ttm', 'market_cap', 'annual_vol', 'basic_eps']
+    num_cols = ['dividend_yield_ttm', 'market_cap', 'annual_vol', 'basic_eps', 'dividend_years']
     df = df.copy()
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -181,19 +182,20 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
     # 硬性条件筛选
     df = df[
         (df['dividend_yield_ttm'] >= MIN_DIVIDEND_YIELD) &
-        (df['dividend_yield_ttm'] <= MAX_DIVIDEND_YIELD) &  # 过滤 f115 异常值
+        (df['dividend_yield_ttm'] <= MAX_DIVIDEND_YIELD) &
         (df['market_cap'] >= MIN_MARKET_CAP) &
         (df['basic_eps'] > MIN_EPS) &
-        (df['annual_vol'].notna()) &  # 波动率必须存在
+        (df['annual_vol'].notna()) &
         (df['dividend_yield_ttm'].notna()) &
         (df['market_cap'].notna()) &
-        (df['basic_eps'].notna())
+        (df['basic_eps'].notna()) &
+        (df['dividend_years'] >= MIN_DIVIDEND_YEARS)  # v6.10新增：连续分红≥3年
     ].copy()
 
     # 股利支付率筛选（允许为空但不超过上限）
     df.loc[:, 'payout_ratio'] = pd.to_numeric(df['payout_ratio'], errors='coerce')
     df = df[
-        (df['payout_ratio'].isna()) |  # 无支付率数据，放过
+        (df['payout_ratio'].isna()) |
         (df['payout_ratio'] <= MAX_PAYOUT_RATIO)
     ].copy()
 
@@ -225,41 +227,66 @@ def min_max_normalize(values: np.ndarray, target: float) -> float:
 
 
 # ============================================================
-# 综合评分
+# 综合评分（v6.10 三因子模型）
 # ============================================================
 
-WEIGHT_DIVIDEND = 0.6   # 股息率权重
-WEIGHT_VOL = 0.4        # 波动率权重
+WEIGHT_DIVIDEND = 0.5      # 股息率权重（v6.10: 0.6 → 0.5）
+WEIGHT_VOL = 0.3           # 波动率权重（v6.10: 0.4 → 0.3）
+WEIGHT_STABILITY = 0.2     # 分红稳定性权重（v6.10新增）
 
 
 def calculate_scores(df: pd.DataFrame) -> pd.DataFrame:
     """
-    两因子评分：股息率 60% + 波动率(取反) 40%。
+    三因子评分：股息率 50% + 波动率(取反) 30% + 分红稳定性 20%。
 
-    使用 min-max 归一化，最终评分映射到 0-100。
+    v6.10升级：两因子 → 三因子
+    - 股息率：min-max归一化
+    - 波动率：min-max归一化后取反（越低越好）
+    - 分红稳定性：直接映射（3年=60分, 4年=80分, 5年+=100分）
     """
     if df.empty:
         return df
 
     div_values = df['dividend_yield_ttm'].values
     vol_values = df['annual_vol'].values
+    div_years_values = df['dividend_years'].values
 
     div_norms = []
     vol_norms = []
+    stability_scores = []
 
     for i in range(len(df)):
+        # 股息率归一化
         d_norm = min_max_normalize(div_values, div_values[i])
+        # 波动率归一化
         v_norm = min_max_normalize(vol_values, vol_values[i])
+        # 分红稳定性评分（直接映射）
+        years = div_years_values[i]
+        if years >= 5:
+            s_score = 100.0
+        elif years == 4:
+            s_score = 80.0
+        elif years == 3:
+            s_score = 60.0
+        else:
+            s_score = 0.0
+
         div_norms.append(d_norm)
         vol_norms.append(v_norm)
+        stability_scores.append(s_score)
 
     df = df.copy()
     df['div_norm'] = div_norms
     df['vol_norm'] = vol_norms
+    df['stability_score'] = stability_scores
     df['vol_score'] = [1.0 - v for v in vol_norms]  # 波动率越低越好
 
     # 综合评分 0-100
-    df['composite_score'] = (df['div_norm'] * WEIGHT_DIVIDEND + df['vol_score'] * WEIGHT_VOL) * 100
+    df['composite_score'] = (
+        df['div_norm'] * WEIGHT_DIVIDEND +
+        df['vol_score'] * WEIGHT_VOL +
+        df['stability_score'] / 100.0 * WEIGHT_STABILITY
+    ) * 100
     df['composite_score'] = df['composite_score'].round(2)
 
     # 按综合评分降序排名
@@ -277,6 +304,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
 
+    v6.10 更新：
+    - 新增 dividend_years 字段（连续分红年数）
+
     v6.9 更新：
     - 新增 pinyin_abbr 字段（股票名称拼音首字母缩写）
 
@@ -291,7 +321,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             'code', 'name', 'industry', 'market', 'dividend_yield', 'annual_vol',
             'composite_score', 'rank', 'market_cap', 'payout_ratio', 'eps',
-            'price', 'pe', 'pb', 'pinyin_abbr',
+            'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years',
             'data_date', 'updated_at'
         ])
 
@@ -301,7 +331,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     # 市场类型推断
     markets = df['code'].apply(infer_market)
 
-    # v6.9: 拼音首字母缩写
+    # 拼音首字母缩写
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
     result = pd.DataFrame({
@@ -320,6 +350,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'pe': df['pe'].round(2),
         'pb': df['pb'].round(2),
         'pinyin_abbr': pinyin_abbrs,
+        'dividend_years': df['dividend_years'].astype(int),
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })
