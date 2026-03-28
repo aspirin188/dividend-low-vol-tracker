@@ -1,0 +1,5 @@
+flask>=2.3,<3.0
+akshare>=1.12
+pandas>=1.5
+numpy>=1.24
+openpyxl>=3.1
