@@ -249,8 +249,8 @@ def export():
     ws = wb.active
     ws.title = '红利低波'
 
-    # 表头（14列）
-    headers = ['排名', '代码', '名称', '行业', '市场', '股价', 'PE', 'PB', '股息率(%)', '波动率(%)', '综合评分', '总市值(亿)', '股利支付率(%)', 'EPS']
+    # 表头（14列）- v6.7调整顺序
+    headers = ['排名', '代码', '名称', '行业', '市场', '股价', 'PE', 'PB', '股息率(%)', '总市值(亿)', '综合评分', '波动率(%)', '股利支付率(%)', 'EPS']
     header_font = Font(bold=True)
     header_alignment = Alignment(horizontal='center')
 
@@ -259,7 +259,7 @@ def export():
         cell.font = header_font
         cell.alignment = header_alignment
 
-    # 数据行
+    # 数据行 - v6.7调整顺序
     for row_idx, s in enumerate(stocks, 2):
         ws.cell(row=row_idx, column=1, value=s.get('rank')).alignment = Alignment(horizontal='center')
         ws.cell(row=row_idx, column=2, value=s.get('code')).alignment = Alignment(horizontal='center')
@@ -270,9 +270,9 @@ def export():
         ws.cell(row=row_idx, column=7, value=s.get('pe')).number_format = '0.00'
         ws.cell(row=row_idx, column=8, value=s.get('pb')).number_format = '0.00'
         ws.cell(row=row_idx, column=9, value=s.get('dividend_yield')).number_format = '0.00'
-        ws.cell(row=row_idx, column=10, value=s.get('annual_vol')).number_format = '0.00'
+        ws.cell(row=row_idx, column=10, value=s.get('market_cap')).number_format = '0.00'
         ws.cell(row=row_idx, column=11, value=s.get('composite_score')).number_format = '0.00'
-        ws.cell(row=row_idx, column=12, value=s.get('market_cap')).number_format = '0.00'
+        ws.cell(row=row_idx, column=12, value=s.get('annual_vol')).number_format = '0.00'
         ws.cell(row=row_idx, column=13, value=s.get('payout_ratio')).number_format = '0.00'
         ws.cell(row=row_idx, column=14, value=s.get('eps')).number_format = '0.00'
 

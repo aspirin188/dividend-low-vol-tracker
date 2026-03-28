@@ -313,14 +313,14 @@
                         <th class="num sortable" data-col="dividend_yield" onclick="handleSort('dividend_yield')">
                             股息率(%)<span class="sort-arrow">↕</span>
                         </th>
-                        <th class="num sortable" data-col="annual_vol" onclick="handleSort('annual_vol')">
-                            波动率(%)<span class="sort-arrow">↕</span>
+                        <th class="num sortable" data-col="market_cap" onclick="handleSort('market_cap')">
+                            市值(亿)<span class="sort-arrow">↕</span>
                         </th>
                         <th class="num sortable sorted" data-col="composite_score" onclick="handleSort('composite_score')">
                             综合评分<span class="sort-arrow">↓</span>
                         </th>
-                        <th class="num sortable" data-col="market_cap" onclick="handleSort('market_cap')">
-                            市值(亿)<span class="sort-arrow">↕</span>
+                        <th class="num sortable" data-col="annual_vol" onclick="handleSort('annual_vol')">
+                            波动率(%)<span class="sort-arrow">↕</span>
                         </th>
                         <th class="num sortable" data-col="payout_ratio" onclick="handleSort('payout_ratio')">
                             支付率(%)<span class="sort-arrow">↕</span>
@@ -465,9 +465,9 @@
                 <td class="num">${s.pe != null ? s.pe : '-'}</td>
                 <td class="num">${s.pb != null ? s.pb : '-'}</td>
                 <td class="num">${s.dividend_yield}</td>
-                <td class="num">${s.annual_vol}</td>
-                <td class="num score">${s.composite_score}</td>
                 <td class="num">${s.market_cap}</td>
+                <td class="num score">${s.composite_score}</td>
+                <td class="num">${s.annual_vol}</td>
                 <td class="num">${s.payout_ratio != null ? s.payout_ratio : '-'}</td>
                 <td class="num">${s.eps != null ? s.eps : '-'}</td>
             </tr>
