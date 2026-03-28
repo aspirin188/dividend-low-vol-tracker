@@ -149,38 +149,86 @@ def fetch_all_quotes() -> pd.DataFrame:
 
 def fetch_eps_batch() -> pd.DataFrame:
     """
-    用 akshare stock_yjbb_em 一次性获取全 A 股最新年报 EPS。
+    用 akshare stock_yjbb_em 一次性获取全 A 股最新年报 EPS 和 ROE。
     约 5200 条数据，1-2 秒。
 
-    返回 DataFrame：code, basic_eps, report_year
+    v6.11新增: 同时获取ROE（净资产收益率）
+    v6.12修复: 使用线程实现超时控制，确保ROE数据能正常获取
+
+    返回 DataFrame：code, basic_eps, roe, report_year
     """
-    # 尝试最近3个年报日期
-    for year_end in ['20241231', '20231231', '20221231']:
+    import threading
+    import time
+    
+    # 用于存储结果的全局变量
+    result_container = {'data': None, 'error': None, 'year': None}
+    
+    def fetch_data(year_end):
+        """在线程中获取数据"""
         try:
             df = ak.stock_yjbb_em(date=year_end)
+            
             if df is None or df.empty:
-                continue
+                return
+            
+            # 检查列名是否包含ROE
+            if '净资产收益率' not in df.columns:
+                result_container['error'] = "未找到'净资产收益率'列"
+                return
 
             # 只保留主板 A 股
             df = df[df['股票代码'].str.startswith(('0', '3', '6'))].copy()
 
             if df.empty:
-                continue
+                return
 
             result = pd.DataFrame({
                 'code': df['股票代码'].values,
                 'basic_eps': pd.to_numeric(df['每股收益'], errors='coerce').values,
+                'roe': pd.to_numeric(df['净资产收益率'], errors='coerce').values,
                 'report_year': int(year_end[:4]),
             })
-
-            print(f"  EPS数据: {len(result)} 只 (年报 {year_end[:4]})")
-            return result
-
+            
+            result_container['data'] = result
+            result_container['year'] = year_end
+            
         except Exception as e:
-            print(f"  EPS获取失败 ({year_end}): {e}")
+            result_container['error'] = str(e)
+    
+    # 尝试最近3个年报日期
+    for year_end in ['20241231', '20231231', '20221231']:
+        print(f"  正在获取 {year_end[:4]} 年报数据...", end=' ', flush=True)
+        
+        # 清空容器
+        result_container = {'data': None, 'error': None, 'year': None}
+        
+        # 启动线程
+        thread = threading.Thread(target=fetch_data, args=(year_end,))
+        thread.start()
+        
+        # 等待最多60秒
+        thread.join(timeout=60)
+        
+        # 检查线程是否完成
+        if thread.is_alive():
+            print("✗ 超时", flush=True)
             continue
-
-    return pd.DataFrame(columns=['code', 'basic_eps', 'report_year'])
+        
+        # 检查结果
+        if result_container['error']:
+            print(f"✗ {result_container['error']}", flush=True)
+            continue
+        
+        if result_container['data'] is not None:
+            result = result_container['data']
+            roe_not_null = result['roe'].notna().sum()
+            print(f"✓ 获取 {len(result)} 只股票, ROE非空 {roe_not_null}/{len(result)}", flush=True)
+            return result
+        
+        print("未获取到数据", flush=True)
+    
+    print("  ✗ 所有日期都失败，返回空DataFrame", flush=True)
+    return pd.DataFrame(columns=['code', 'basic_eps', 'roe', 'report_year'])
 
 
 # ============================================================
@@ -298,16 +346,85 @@ def calculate_ttm_dividend_batch(codes: list, prices: dict) -> dict:
 # 4. 获取候选股的分红方案（只查几十只）
 # ============================================================
 
+def fetch_dividend_from_akshare(year: str = '2024') -> pd.DataFrame:
+    """
+    从akshare获取分红数据（v6.14新增）。
+    
+    使用stock_fhps_em接口获取每股股利数据。
+    该接口返回每10股派息金额，需要除以10得到每股股利。
+    
+    参数:
+        year: 年份，如'2024'，对应日期为'{year}1231'
+    
+    返回 DataFrame：code, dividend_per_share
+    """
+    import threading
+    
+    result_container = {'data': None, 'error': None}
+    
+    def fetch_data():
+        try:
+            df = ak.stock_fhps_em(date=f"{year}1231")
+            
+            if df is None or df.empty:
+                result_container['error'] = "未获取到数据"
+                return
+            
+            # 筛选A股
+            a_stock = df[df['代码'].str.startswith(('0', '3', '6'))].copy()
+            
+            if a_stock.empty:
+                result_container['error'] = "无A股数据"
+                return
+            
+            # 计算每股股利：现金分红比例 / 10
+            # "现金分红-现金分红比例" 是每10股派息金额
+            a_stock['每股股利'] = pd.to_numeric(a_stock['现金分红-现金分红比例'], errors='coerce') / 10
+            
+            result = pd.DataFrame({
+                'code': a_stock['代码'].values,
+                'dividend_per_share': a_stock['每股股利'].values,
+            })
+            
+            result_container['data'] = result
+            
+        except Exception as e:
+            result_container['error'] = str(e)
+    
+    # 启动线程（60秒超时）
+    thread = threading.Thread(target=fetch_data)
+    thread.start()
+    thread.join(timeout=60)
+    
+    if thread.is_alive():
+        print(f"  ✗ 分红数据获取超时", flush=True)
+        return pd.DataFrame(columns=['code', 'dividend_per_share'])
+    
+    if result_container['error']:
+        print(f"  ✗ 分红数据获取失败: {result_container['error']}", flush=True)
+        return pd.DataFrame(columns=['code', 'dividend_per_share'])
+    
+    if result_container['data'] is not None:
+        df = result_container['data']
+        valid = df['dividend_per_share'].notna().sum()
+        print(f"  ✓ 获取 {len(df)} 只股票的分红数据，有每股股利 {valid}/{len(df)}", flush=True)
+        return df
+    
+    return pd.DataFrame(columns=['code', 'dividend_per_share'])
+
+
 def fetch_dividend_for_candidates(codes: list) -> pd.DataFrame:
     """
-    从东方财富数据中心获取候选股的最新年报分红方案。
+    从东方财富数据中心获取候选股的最新年报分红方案及财务数据。
     按 REPORTDATE 降序拉取，拉6页即可覆盖所有最新年报。
     同一只股票取最新年报。
 
-    返回 DataFrame：code, dividend_per_share, payout_ratio
+    v6.11新增：同时获取资产负债率
+
+    返回 DataFrame：code, dividend_per_share, payout_ratio, debt_ratio
     """
     if not codes:
-        return pd.DataFrame(columns=['code', 'dividend_per_share', 'payout_ratio'])
+        return pd.DataFrame(columns=['code', 'dividend_per_share', 'payout_ratio', 'debt_ratio'])
 
     code_set = set(codes)
     stock_data = {}  # {code: item}
@@ -315,7 +432,7 @@ def fetch_dividend_for_candidates(codes: list) -> pd.DataFrame:
     for page in range(1, 8):  # 7页足够
         params = {
             'reportName': 'RPT_LICO_FN_CPD',
-            'columns': 'SECURITY_CODE,SECURITY_NAME_ABBR,BASIC_EPS,ASSIGNDSCRPT,REPORTDATE,DATATYPE',
+            'columns': 'SECURITY_CODE,SECURITY_NAME_ABBR,BASIC_EPS,ASSIGNDSCRPT,REPORTDATE,DATATYPE,ASSETLIABRATIO',
             'filter': '(DATEMMDD="年报")',
             'pageNumber': page,
             'pageSize': 5000,
@@ -363,13 +480,29 @@ def fetch_dividend_for_candidates(codes: list) -> pd.DataFrame:
         if dividend_per_share and eps and eps > 0:
             payout_ratio = round((dividend_per_share / eps) * 100, 2)
 
+        # v6.12修改：移除ROE（东方财富接口不支持WEIGHTEDAVERAGEORE字段）
+        # ROE数据在fetch_eps_batch()中通过akshare获取
+        
+        debt_ratio = item.get('ASSETLIABRATIO')
+        if debt_ratio is not None:
+            try:
+                debt_ratio = round(float(debt_ratio), 2)
+            except (ValueError, TypeError):
+                debt_ratio = None
+
         results.append({
             'code': code,
             'dividend_per_share': dividend_per_share,
             'payout_ratio': payout_ratio,
+            'debt_ratio': debt_ratio,
         })
 
-    df = pd.DataFrame(results)
+    # v6.12修复：确保返回的 DataFrame 有正确的列（即使 results 为空）
+    if not results:
+        df = pd.DataFrame(columns=['code', 'dividend_per_share', 'payout_ratio', 'debt_ratio'])
+    else:
+        df = pd.DataFrame(results)
+    
     print(f"  分红数据: {len(df)}/{len(code_set)} 只")
     return df
 
@@ -397,9 +530,14 @@ def _parse_dividend_per_share(desc: str) -> float:
 
 def get_dividend_years(code: str) -> int:
     """
-    获取股票连续分红年数。
+    获取股票连续分红年数（v6.11修复）。
 
-    查询过去5年的分红方案，统计有分红记录的年份数。
+    从最近一个有分红的年份开始，往前连续有分红的年份数。
+    如果中间断开，则只计连续部分。
+
+    v6.11修复：
+    - 改为"连续"分红逻辑，而非累计年份数
+    - 分红判断增加"送"字（股票分红）
 
     返回：连续分红年数（1-5），如果没有分红记录返回0。
     """
@@ -431,7 +569,7 @@ def get_dividend_years(code: str) -> int:
         if not items:
             return 0
 
-        # 统计有分红的年份数
+        # 统计有分红的年份（v6.11: 增加"送"字判断）
         dividend_years = set()
 
         for item in items:
@@ -448,12 +586,42 @@ def get_dividend_years(code: str) -> int:
             if report_date < five_years_ago:
                 continue
 
-            # 检查是否有分红（包含"派"字样）
+            # v6.11修复: 检查是否有分红（包含"派"或"送"字样）
             desc = item.get('ASSIGNDSCRPT', '')
-            if desc and '派' in str(desc):
+            if desc and ('派' in str(desc) or '送' in str(desc)):
                 dividend_years.add(report_date.year)
 
-        return len(dividend_years)
+        if not dividend_years:
+            return 0
+
+        # v6.11修复: 计算连续分红年数
+        # 从最近一年往前检查，遇到断开则停止
+        sorted_years = sorted(dividend_years, reverse=True)
+        current_year = now.year
+
+        # 找到最近有分红的年份
+        start_year = None
+        for y in sorted_years:
+            if y <= current_year:
+                start_year = y
+                break
+
+        if start_year is None:
+            return 0
+
+        # 从start_year往前数连续年份数
+        consecutive_count = 0
+        expected_year = start_year
+
+        for y in sorted_years:
+            if y == expected_year:
+                consecutive_count += 1
+                expected_year -= 1
+            else:
+                # 断开了，停止计数
+                break
+
+        return consecutive_count
 
     except Exception as e:
         print(f"  分红年数获取失败 {code}: {e}")
@@ -597,9 +765,33 @@ def merge_all_data() -> pd.DataFrame:
     candidate_codes = merged['code'].tolist()
     print(f"步骤5/8: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥3%）")
 
-    print("步骤6/8: 获取候选股分红数据（计算股利支付率）...")
-    div_df = fetch_dividend_for_candidates(candidate_codes)
+    print("步骤6/8: 获取分红数据（计算股利支付率）...")
+    
+    # v6.14修复：使用akshare的stock_fhps_em接口获取分红数据
+    # 原因：东方财富RPT_LICO_FN_CPD接口返回空数据
+    div_df = fetch_dividend_from_akshare('2024')
     merged = merged.merge(div_df, on='code', how='left')
+    
+    # 计算支付率：每股股利 / 每股收益 * 100
+    print("  计算股利支付率...", flush=True)
+    
+    # 确保字段为数值类型
+    for col in ['dividend_per_share', 'basic_eps']:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors='coerce')
+    
+    merged['payout_ratio'] = None
+    mask = (merged['dividend_per_share'].notna()) & (merged['basic_eps'] > 0)
+    merged.loc[mask, 'payout_ratio'] = (
+        merged.loc[mask, 'dividend_per_share'] / merged.loc[mask, 'basic_eps'] * 100
+    ).round(2)
+    payout_count = merged['payout_ratio'].notna().sum()
+    print(f"  ✓ 成功计算 {payout_count}/{len(merged)} 只股票的支付率", flush=True)
+    
+    # v6.14：负债率数据暂时不可用
+    if 'debt_ratio' not in merged.columns:
+        merged['debt_ratio'] = None
+    print("  ⚠️  负债率数据源暂不可用", flush=True)
 
     # v6.10新增：获取分红年数
     print("步骤7/8: 获取候选股分红年数（计算分红稳定性）...")

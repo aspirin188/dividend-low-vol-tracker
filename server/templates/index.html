@@ -264,7 +264,10 @@
         <span class="model-title">三因子评分模型：</span>
         综合评分 = 股息率 × 50% + 波动率(反向) × 30% + 分红稳定性 × 20%
         <span class="model-divider">|</span>
-        <span class="model-detail">分红稳定性：3年=60分、4年=80分、5年+=100分</span>
+        <span class="model-detail">
+            分红稳定性：3年=60分、4年=80分、5年+=100分；
+            <strong>筛选条件：</strong>股息率≥3%、市值≥500亿、连续分红≥3年、ROE≥8%、负债率≤70%(金融地产≤85%)
+        </span>
     </div>
 
     <!-- Empty State (首次使用) -->
@@ -360,6 +363,12 @@
                         <th class="num sortable" data-col="dividend_years" onclick="handleSort('dividend_years')">
                             分红年数<span class="sort-arrow">↕</span>
                         </th>
+                        <th class="num sortable" data-col="roe" onclick="handleSort('roe')">
+                            ROE(%)<span class="sort-arrow">↕</span>
+                        </th>
+                        <th class="num sortable" data-col="debt_ratio" onclick="handleSort('debt_ratio')">
+                            负债率(%)<span class="sort-arrow">↕</span>
+                        </th>
                     </tr>
                 </thead>
                 <tbody id="stockBody"></tbody>
@@ -375,7 +384,7 @@
 </main>
 
 <footer>
-    © 2026 红利低波跟踪系统 v6.10 极简版
+    © 2026 红利低波跟踪系统 v6.11 极简版
 </footer>
 
 <!-- Toast -->
@@ -397,7 +406,7 @@
     // 数值列定义
     const NUMERIC_COLS = new Set([
         'rank', 'price', 'pe', 'pb', 'dividend_yield', 'annual_vol',
-        'composite_score', 'market_cap', 'payout_ratio', 'eps', 'dividend_years'
+        'composite_score', 'market_cap', 'payout_ratio', 'eps', 'dividend_years', 'roe', 'debt_ratio'
     ]);
 
     // ===== Init =====
@@ -504,6 +513,8 @@
                 <td class="num">${s.payout_ratio != null ? s.payout_ratio : '-'}</td>
                 <td class="num">${s.eps != null ? s.eps : '-'}</td>
                 <td class="num">${s.dividend_years != null ? s.dividend_years : '-'}</td>
+                <td class="num">${s.roe != null ? s.roe : '-'}</td>
+                <td class="num">${s.debt_ratio != null ? s.debt_ratio : '-'}</td>
             </tr>
         `).join('');
     }

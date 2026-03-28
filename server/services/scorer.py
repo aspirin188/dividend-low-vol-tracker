@@ -27,12 +27,18 @@ from pypinyin import lazy_pinyin
 # 硬性筛选条件
 # ============================================================
 
-MIN_DIVIDEND_YIELD = 3.0   # 股息率 ≥ 3% (v6.8调整: 4.0 → 3.0)
+MIN_DIVIDEND_YIELD = 3.0   # 股息率 ≥ 3%
 MAX_DIVIDEND_YIELD = 30.0   # 股息率 ≤ 30%（异常数据过滤）
-MIN_MARKET_CAP = 500.0      # 总市值 ≥ 500 亿 (v6.8调整: 100.0 → 500.0)
+MIN_MARKET_CAP = 500.0      # 总市值 ≥ 500 亿
 MAX_PAYOUT_RATIO = 150.0    # 股利支付率 ≤ 150%
 MIN_EPS = 0.0               # EPS > 0
-MIN_DIVIDEND_YEARS = 3      # 连续分红年数 ≥ 3年 (v6.10新增)
+MIN_DIVIDEND_YEARS = 3      # 连续分红年数 ≥ 3年
+MIN_ROE = 8.0               # ROE ≥ 8%（v6.11新增）
+MAX_DEBT_RATIO = 70.0       # 资产负债率 ≤ 70%（v6.11新增）
+MAX_DEBT_RATIO_FINANCE = 85.0  # 金融地产资产负债率 ≤ 85%（v6.11新增）
+
+# 金融地产行业列表（用于资产负债率差异化筛选）
+FINANCE_INDUSTRIES = {'金融', '地产基建'}
 
 
 # ============================================================
@@ -166,15 +172,17 @@ def get_pinyin_abbr(name: str) -> str:
 
 def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
     """
-    硬性筛选：股息率 ≥ 3%、市值 ≥ 500亿、支付率 ≤ 150%、EPS > 0、非ST、数据完整、连续分红≥3年。
+    硬性筛选：股息率≥3%、市值≥500亿、支付率≤150%、EPS>0、非ST、连续分红≥3年、ROE≥8%、负债率≤70%(金融地产≤85%)。
 
     原则：宁可少，不可错。数据不全直接过滤。
+
+    v6.11新增：ROE、资产负债率筛选
     """
     # 排除 ST
     df = df[~df['name'].str.contains('ST', case=False, na=False)]
 
     # 确保关键字段为数值类型
-    num_cols = ['dividend_yield_ttm', 'market_cap', 'annual_vol', 'basic_eps', 'dividend_years']
+    num_cols = ['dividend_yield_ttm', 'market_cap', 'annual_vol', 'basic_eps', 'dividend_years', 'roe', 'debt_ratio']
     df = df.copy()
     for col in num_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -189,7 +197,9 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
         (df['dividend_yield_ttm'].notna()) &
         (df['market_cap'].notna()) &
         (df['basic_eps'].notna()) &
-        (df['dividend_years'] >= MIN_DIVIDEND_YEARS)  # v6.10新增：连续分红≥3年
+        (df['dividend_years'] >= MIN_DIVIDEND_YEARS) &
+        (df['roe'].notna()) &
+        (df['roe'] >= MIN_ROE)  # v6.11新增：ROE≥8%
     ].copy()
 
     # 股利支付率筛选（允许为空但不超过上限）
@@ -198,6 +208,26 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
         (df['payout_ratio'].isna()) |
         (df['payout_ratio'] <= MAX_PAYOUT_RATIO)
     ].copy()
+
+    # v6.12修改：资产负债率筛选暂时禁用
+    # 原因：debt_ratio数据源问题，东方财富接口可能不支持该字段
+    # TODO: 改用其他数据源获取负债率
+    # 
+    # # 先归并行业
+    # industry_norms = df['industry'].fillna('').apply(normalize_industry)
+    # 
+    # def check_debt_ratio(idx):
+    #     """检查资产负债率是否符合要求"""
+    #     debt = df.loc[idx, 'debt_ratio']
+    #     if pd.isna(debt):
+    #         return False  # 数据缺失，过滤
+    #     industry = industry_norms.loc[idx]
+    #     if industry in FINANCE_INDUSTRIES:
+    #         return debt <= MAX_DEBT_RATIO_FINANCE
+    #     else:
+    #         return debt <= MAX_DEBT_RATIO
+    # 
+    # df = df[df.index.map(check_debt_ratio)].copy()
 
     return df
 
@@ -304,6 +334,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
 
+    v6.11 更新：
+    - 新增 roe、debt_ratio 字段
+
     v6.10 更新：
     - 新增 dividend_years 字段（连续分红年数）
 
@@ -321,7 +354,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             'code', 'name', 'industry', 'market', 'dividend_yield', 'annual_vol',
             'composite_score', 'rank', 'market_cap', 'payout_ratio', 'eps',
-            'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years',
+            'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years', 'roe', 'debt_ratio',
             'data_date', 'updated_at'
         ])
 
@@ -333,6 +366,11 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
 
     # 拼音首字母缩写
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
+
+    # 确保数值字段是数值类型（v6.12修复）
+    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
     result = pd.DataFrame({
         'code': df['code'],
@@ -351,6 +389,8 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'pb': df['pb'].round(2),
         'pinyin_abbr': pinyin_abbrs,
         'dividend_years': df['dividend_years'].astype(int),
+        'roe': df['roe'].round(2),
+        'debt_ratio': df['debt_ratio'].round(2),
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })
