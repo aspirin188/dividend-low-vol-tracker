@@ -255,7 +255,8 @@
     <div id="tableSection" style="display:none;">
         <div class="controls">
             <input type="text" class="search-input" id="searchInput"
-                   placeholder="搜索名称/代码..." oninput="debounceSearch()">
+                   placeholder="搜索名称/代码/简拼..." oninput="debounceSearch()">
+            <button class="btn btn-secondary" onclick="resetFilters()">复原</button>
         </div>
         <div class="controls-row">
             <select class="filter-select" id="industryFilter" onchange="loadStocks()">
@@ -343,7 +344,7 @@
 </main>
 
 <footer>
-    © 2026 红利低波跟踪系统 v6.5 极简版
+    © 2026 红利低波跟踪系统 v6.9 极简版
 </footer>
 
 <!-- Toast -->
@@ -619,6 +620,26 @@
     function debounceSearch() {
         clearTimeout(searchTimer);
         searchTimer = setTimeout(loadStocks, 200);
+    }
+
+    // ===== Reset Filters（v6.9 新增）=====
+    function resetFilters() {
+        // 清空搜索框
+        document.getElementById('searchInput').value = '';
+        
+        // 重置所有筛选器为默认值
+        document.getElementById('industryFilter').value = '';
+        document.getElementById('marketCapFilter').value = '';
+        document.getElementById('divYieldFilter').value = '';
+        document.getElementById('marketFilter').value = '';
+        
+        // 重置排序状态为默认（综合评分降序）
+        sortColumn = 'composite_score';
+        sortDirection = 'desc';
+        updateSortHeaders();
+        
+        // 刷新数据
+        loadStocks();
     }
 
     // ===== Toast =====

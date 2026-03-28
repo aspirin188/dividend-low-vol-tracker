@@ -5,6 +5,9 @@
   综合评分 = 股息率归一化 × 60% + (1 - 波动率归一化) × 40%
   归一化方式：min-max，映射到 0-100 分
 
+v6.9 新增：
+  - 简拼搜索：计算股票名称拼音首字母缩写
+
 v6.8 调整：
   - 股息率下限：4% → 3%
   - 市值下限：100亿 → 500亿
@@ -17,6 +20,7 @@ v6.5 新增：
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from pypinyin import lazy_pinyin
 
 
 # ============================================================
@@ -134,6 +138,31 @@ def infer_market(code: str) -> str:
         return '未知'
 
 
+# ============================================================
+# 拼音首字母计算（v6.9 新增）
+# ============================================================
+
+def get_pinyin_abbr(name: str) -> str:
+    """
+    获取股票名称的拼音首字母缩写。
+    
+    例如：
+    - "建设银行" → "jsyh"
+    - "中国银行" → "zgyh"
+    - "招商银行" → "zsyh"
+    """
+    if not name:
+        return ''
+    try:
+        # lazy_pinyin 返回每个字的拼音列表
+        pinyin_list = lazy_pinyin(name)
+        # 取每个拼音的首字母，拼接成缩写
+        abbr = ''.join([p[0].lower() for p in pinyin_list if p])
+        return abbr
+    except Exception:
+        return ''
+
+
 def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
     """
     硬性筛选：股息率 ≥ 4%、市值 ≥ 100亿、支付率 ≤ 150%、EPS > 0、非ST、数据完整。
@@ -248,6 +277,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
 
+    v6.9 更新：
+    - 新增 pinyin_abbr 字段（股票名称拼音首字母缩写）
+
     v6.5 更新：
     - industry 字段归并到大类行业
     - 新增 market 字段（从代码推断市场类型）
@@ -259,7 +291,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         return pd.DataFrame(columns=[
             'code', 'name', 'industry', 'market', 'dividend_yield', 'annual_vol',
             'composite_score', 'rank', 'market_cap', 'payout_ratio', 'eps',
-            'price', 'pe', 'pb',
+            'price', 'pe', 'pb', 'pinyin_abbr',
             'data_date', 'updated_at'
         ])
 
@@ -268,6 +300,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
 
     # 市场类型推断
     markets = df['code'].apply(infer_market)
+
+    # v6.9: 拼音首字母缩写
+    pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
     result = pd.DataFrame({
         'code': df['code'],
@@ -284,6 +319,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'price': df['price'].round(2),
         'pe': df['pe'].round(2),
         'pb': df['pb'].round(2),
+        'pinyin_abbr': pinyin_abbrs,
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })

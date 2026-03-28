@@ -57,13 +57,14 @@ def init_db():
             price            REAL,
             pe               REAL,
             pb               REAL,
+            pinyin_abbr      TEXT,
             data_date        TEXT,
             updated_at       TEXT
         )
     ''')
 
     # 兼容旧数据库：新增列
-    for col, col_type in [('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), ('market', 'TEXT')]:
+    for col, col_type in [('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), ('market', 'TEXT'), ('pinyin_abbr', 'TEXT')]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')
         except sqlite3.OperationalError:
@@ -162,8 +163,9 @@ def stocks():
 
     conditions = []
     if q:
-        conditions.append('(name LIKE ? OR code LIKE ?)')
-        params.extend([f'%{q}%', f'%{q}%'])
+        # v6.9: 支持简拼搜索，同时匹配名称、代码、拼音首字母
+        conditions.append('(name LIKE ? OR code LIKE ? OR pinyin_abbr LIKE ?)')
+        params.extend([f'%{q}%', f'%{q}%', f'%{q}%'])
     if industry:
         conditions.append('industry = ?')
         params.append(industry)
