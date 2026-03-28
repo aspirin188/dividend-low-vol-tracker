@@ -477,7 +477,7 @@ def merge_all_data() -> pd.DataFrame:
         merged[col] = pd.to_numeric(merged[col], errors='coerce')
 
     pre_filtered = merged[
-        (merged['market_cap'] >= 100.0) &
+        (merged['market_cap'] >= 500.0) &  # v6.8调整: 100.0 → 500.0
         (merged['basic_eps'] > 0) &
         (merged['market_cap'].notna()) &
         (merged['basic_eps'].notna()) &
@@ -486,7 +486,7 @@ def merge_all_data() -> pd.DataFrame:
     ].copy()
 
     candidate_codes = pre_filtered['code'].tolist()
-    print(f"步骤3/7: 初筛后 {len(candidate_codes)} 只候选股（市值≥100亿、EPS>0、非ST）")
+    print(f"步骤3/7: 初筛后 {len(candidate_codes)} 只候选股（市值≥500亿、EPS>0、非ST）")
 
     # v6.6新增：自计算TTM股息率
     print("步骤4/7: 计算候选股TTM股息率（自计算,这需要几分钟）...")
@@ -498,14 +498,14 @@ def merge_all_data() -> pd.DataFrame:
     div_df = pd.DataFrame(list(div_yields.items()), columns=['code', 'dividend_yield_ttm'])
     merged = merged.merge(div_df, on='code', how='left')
 
-    # 第二次筛选：股息率>=4%
+    # 第二次筛选：股息率>=3%
     merged = merged[
         (merged['dividend_yield_ttm'].notna()) &
-        (merged['dividend_yield_ttm'] >= 4.0)
+        (merged['dividend_yield_ttm'] >= 3.0)  # v6.8调整: 4.0 → 3.0
     ].copy()
 
     candidate_codes = merged['code'].tolist()
-    print(f"步骤5/7: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥4%）")
+    print(f"步骤5/7: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥3%）")
 
     print("步骤6/7: 获取候选股分红数据（计算股利支付率）...")
     div_df = fetch_dividend_for_candidates(candidate_codes)
