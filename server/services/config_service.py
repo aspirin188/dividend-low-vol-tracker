@@ -116,6 +116,17 @@ class ConfigService:
             'max_value': '100',
             'unit': '%',
         },
+        {
+            'config_key': 'VOL_WINDOW',
+            'config_value': '120',
+            'config_type': 'int',
+            'category': 'B风控',
+            'description': '计算波动率的交易日窗口。120日≈6个月（响应快），252日≈1年（更稳定）。建议根据投资风格选择',
+            'default_value': '120',
+            'min_value': '120',
+            'max_value': '252',
+            'unit': '日',
+        },
         
         # C类：评分权重参数
         {

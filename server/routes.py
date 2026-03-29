@@ -76,7 +76,8 @@ def init_db():
         ('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), 
         ('market', 'TEXT'), ('pinyin_abbr', 'TEXT'), 
         ('dividend_years', 'INTEGER'), ('roe', 'REAL'), ('debt_ratio', 'REAL'),
-        ('price_percentile', 'REAL')  # v6.19新增
+        ('price_percentile', 'REAL'),  # v6.19新增
+        ('payout_3y_avg', 'REAL')  # v7.0新增
     ]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')

@@ -286,6 +286,7 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
     """
     三因子评分：股息率 X% + 波动率(取反) Y% + 分红稳定性 Z%。
     
+    v7.0升级：稳定性评分增强（分红年数 + 支付率稳定性）
     v6.20改造：权重从配置服务读取
     v6.10升级：两因子 → 三因子
     - 股息率：min-max归一化
@@ -310,22 +311,38 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
     div_norms = []
     vol_norms = []
     stability_scores = []
+    
+    # v7.0新增：支付率稳定性评分
+    from server.services.fetcher import calculate_payout_stability_score
+    payout_stability_scores = []
+    payout_3y_avgs = []
 
     for i in range(len(df)):
         # 股息率归一化
         d_norm = min_max_normalize(div_values, div_values[i])
         # 波动率归一化
         v_norm = min_max_normalize(vol_values, vol_values[i])
-        # 分红稳定性评分（直接映射）
+        
+        # 分红稳定性评分（基础版：按年数）
         years = div_years_values[i]
         if years >= 5:
-            s_score = 100.0
+            years_score = 100.0
         elif years == 4:
-            s_score = 80.0
+            years_score = 80.0
         elif years == 3:
-            s_score = 60.0
+            years_score = 60.0
         else:
-            s_score = 0.0
+            years_score = 0.0
+        
+        # v7.0新增：支付率稳定性评分
+        code = df.iloc[i]['code']
+        payout_3y_avg, payout_stability = calculate_payout_stability_score(code)
+        
+        payout_3y_avgs.append(payout_3y_avg)
+        payout_stability_scores.append(payout_stability)
+        
+        # v7.0: 稳定性总分 = 年数分 × 0.6 + 支付率稳定性分 × 0.4
+        s_score = years_score * 0.6 + payout_stability * 0.4
 
         div_norms.append(d_norm)
         vol_norms.append(v_norm)
@@ -336,6 +353,10 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
     df['vol_norm'] = vol_norms
     df['stability_score'] = stability_scores
     df['vol_score'] = [1.0 - v for v in vol_norms]  # 波动率越低越好
+    
+    # v7.0新增：保存支付率相关字段
+    df['payout_3y_avg'] = payout_3y_avgs
+    df['payout_stability_score'] = payout_stability_scores
 
     # 综合评分 0-100
     df['composite_score'] = (
@@ -359,6 +380,9 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
 def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
+
+    v7.0 更新：
+    - 新增 payout_3y_avg 字段（支付率3年均值）
 
     v6.19 更新：
     - 新增 price_percentile 字段（股价历史百分位）
@@ -384,7 +408,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
             'code', 'name', 'industry', 'market', 'dividend_yield', 'annual_vol',
             'composite_score', 'rank', 'market_cap', 'payout_ratio', 'eps',
             'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years', 'roe', 'debt_ratio',
-            'price_percentile', 'data_date', 'updated_at'
+            'price_percentile', 'payout_3y_avg', 'data_date', 'updated_at'
         ])
 
     # 行业归并
@@ -397,7 +421,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
     # 确保数值字段是数值类型（v6.12修复）
-    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile']:
+    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile', 'payout_3y_avg']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -421,6 +445,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'roe': df['roe'].round(2),
         'debt_ratio': df['debt_ratio'].round(2),
         'price_percentile': df['price_percentile'].round(2),
+        'payout_3y_avg': df['payout_3y_avg'].round(2) if 'payout_3y_avg' in df.columns else None,
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })

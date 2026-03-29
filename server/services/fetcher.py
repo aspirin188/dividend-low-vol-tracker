@@ -35,7 +35,8 @@ _EM_DC_URL = 'https://datacenter-web.eastmoney.com/api/data/v1/get'
 _HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'}
 _TIMEOUT = 30
 
-_VOL_WINDOW = 120
+# v7.0: 波动率窗口改为配置化，此处作为默认值
+_VOL_WINDOW_DEFAULT = 120
 _VOL_ANNUALIZE = math.sqrt(242)
 
 
@@ -652,13 +653,26 @@ def get_dividend_years_batch(codes: list) -> dict:
 # 5. 计算波动率（120日对数收益率年化）
 # ============================================================
 
-def calculate_volatility(code: str, end_date: str = None) -> float:
-    """计算单只股票的年化波动率（%）。"""
+def calculate_volatility(code: str, end_date: str = None, days: int = None) -> float:
+    """
+    计算单只股票的年化波动率（%）。
+    
+    v7.0修改：波动率窗口可配置
+    """
     try:
+        # v7.0: 从配置服务读取窗口天数
+        if days is None:
+            try:
+                from server.services.config_service import ConfigService
+                config = ConfigService.get_instance()
+                days = config.get_int('VOL_WINDOW')
+            except:
+                days = _VOL_WINDOW_DEFAULT  # 默认120日
+        
         if end_date is None:
             end_date = datetime.now().strftime('%Y%m%d')
 
-        start_dt = datetime.now() - timedelta(days=400)
+        start_dt = datetime.now() - timedelta(days=days*2)  # 预留更多天数
         start_date = start_dt.strftime('%Y%m%d')
 
         df = ak.stock_zh_a_hist(
@@ -669,10 +683,10 @@ def calculate_volatility(code: str, end_date: str = None) -> float:
             adjust='qfq',
         )
 
-        if df is None or len(df) < _VOL_WINDOW:
+        if df is None or len(df) < days:
             return None
 
-        close = df['收盘'].tail(_VOL_WINDOW).values
+        close = df['收盘'].tail(days).values
         log_returns = np.log(close[1:] / close[:-1])
         vol = np.std(log_returns, ddof=1) * _VOL_ANNUALIZE
 
@@ -732,12 +746,14 @@ def calculate_price_percentile(code: str, days: int = 250) -> float:
         )
         
         if df is None or len(df) == 0:
+            print(f"  ⚠️ {code} 历史数据为空", flush=True)
             return None
         
         # 只取最近days天的数据
         df = df.tail(days)
         
         if len(df) == 0:
+            print(f"  ⚠️ {code} tail后数据为空", flush=True)
             return None
         
         # 当前价格（最新收盘价）
@@ -753,6 +769,7 @@ def calculate_price_percentile(code: str, days: int = 250) -> float:
         return round(percentile, 2)
         
     except Exception as e:
+        print(f"  ✗ {code} 股价百分位计算失败: {e}", flush=True)
         return None
 
 
@@ -770,6 +787,8 @@ def calculate_price_percentile_batch(codes: list, days: int = 250) -> dict:
     result = {}
     total = len(codes)
     
+    print(f"  开始计算 {total} 只股票的股价百分位...", flush=True)
+    
     for i, code in enumerate(codes):
         percentile = calculate_price_percentile(code, days)
         if percentile is not None:
@@ -777,13 +796,330 @@ def calculate_price_percentile_batch(codes: list, days: int = 250) -> dict:
         
         # 显示进度
         if (i + 1) % 10 == 0:
-            print(f"  价格百分位进度: {i + 1}/{total}")
+            success_count = len(result)
+            print(f"  价格百分位进度: {i + 1}/{total}, 成功: {success_count}", flush=True)
         
         # 防止频率限制
         if (i + 1) % 5 == 0:
             time.sleep(0.3)
     
+    print(f"  价格百分位计算完成: 成功 {len(result)}/{total}", flush=True)
     return result
+
+
+# ============================================================
+# v7.0 新增：历史分红数据获取
+# ============================================================
+
+def get_dividend_history(code: str, years: int = 3) -> list:
+    """
+    获取近N年每年每股分红
+    
+    v7.0新增：用于计算3年平均股息率和支付率稳定性
+    
+    参数:
+        code: 股票代码
+        years: 年数，默认3年
+    
+    返回:
+        [{year: 2024, div_per_share: 0.5, ex_date: '2024-06-01'}, ...]
+    """
+    try:
+        now = datetime.now()
+        start_year = now.year - years + 1
+        
+        # 查询分红方案
+        params = {
+            'reportName': 'RPT_LICO_FN_CPD',
+            'columns': 'SECURITY_CODE,ASSIGNDSCRPT,REPORTDATE',
+            'filter': f'(SECURITY_CODE="{code}")',
+            'pageNumber': 1,
+            'pageSize': 20,  # 最近20条足够
+            'sortTypes': -1,
+            'sortColumns': 'REPORTDATE',
+            'source': 'WEB',
+            'client': 'WEB',
+        }
+
+        r = requests.get(_EM_DC_URL, params=params, headers=_HEADERS, timeout=_TIMEOUT)
+        r.raise_for_status()
+        resp = r.json()
+
+        if not resp.get('success') or not resp.get('result'):
+            return []
+
+        items = resp['result'].get('data', [])
+        if not items:
+            return []
+
+        # 按年份分组，计算每年每股分红
+        year_dividends = {}  # {year: div_per_share}
+        
+        for item in items:
+            report_date_str = item.get('REPORTDATE', '')[:10]
+            if not report_date_str:
+                continue
+
+            try:
+                report_date = datetime.strptime(report_date_str, '%Y-%m-%d')
+            except ValueError:
+                continue
+
+            year = report_date.year
+            
+            # 只统计最近N年
+            if year < start_year:
+                continue
+            
+            # 解析分红方案
+            desc = item.get('ASSIGNDSCRPT', '')
+            per_share = _parse_dividend_per_share(desc)
+            
+            if per_share and per_share > 0:
+                # 同一年多次分红，累加
+                if year in year_dividends:
+                    year_dividends[year] += per_share
+                else:
+                    year_dividends[year] = per_share
+
+        # 构建返回结果
+        result = []
+        for year in sorted(year_dividends.keys(), reverse=True):
+            result.append({
+                'year': year,
+                'div_per_share': year_dividends[year],
+                'ex_date': f'{year}-12-31'  # 简化处理
+            })
+        
+        return result
+
+    except Exception as e:
+        print(f"  历史分红获取失败 {code}: {e}")
+        return []
+
+
+def get_payout_history(code: str, years: int = 3) -> list:
+    """
+    获取近N年每年支付率
+    
+    v7.0新增：用于计算支付率稳定性评分
+    
+    参数:
+        code: 股票代码
+        years: 年数，默认3年
+    
+    返回:
+        [{year: 2024, payout: 65.5, div_per_share: 0.5, eps: 0.77}, ...]
+    """
+    try:
+        # 获取历史分红
+        div_history = get_dividend_history(code, years)
+        
+        if not div_history:
+            return []
+        
+        # 获取EPS数据（从业绩报表）
+        eps_data = get_eps_history(code, years)
+        
+        result = []
+        for div_item in div_history:
+            year = div_item['year']
+            div_per_share = div_item['div_per_share']
+            
+            # 查找对应年份的EPS
+            eps_item = next((e for e in eps_data if e['year'] == year), None)
+            
+            if eps_item and eps_item['eps'] and eps_item['eps'] > 0:
+                payout = (div_per_share / eps_item['eps']) * 100
+                payout = round(payout, 2)
+            else:
+                payout = None
+            
+            result.append({
+                'year': year,
+                'payout': payout,
+                'div_per_share': div_per_share,
+                'eps': eps_item['eps'] if eps_item else None
+            })
+        
+        return result
+
+    except Exception as e:
+        print(f"  支付率历史获取失败 {code}: {e}")
+        return []
+
+
+def get_eps_history(code: str, years: int = 3) -> list:
+    """
+    获取近N年每年EPS
+    
+    v7.0新增：辅助函数，用于计算历史支付率
+    
+    参数:
+        code: 股票代码
+        years: 年数，默认3年
+    
+    返回:
+        [{year: 2024, eps: 0.77}, ...]
+    """
+    try:
+        now = datetime.now()
+        start_year = now.year - years + 1
+        
+        # 尝试从akshare获取年报数据
+        eps_by_year = {}
+        
+        for year_offset in range(0, years):
+            year = now.year - year_offset
+            date_str = f"{year}1231"
+            
+            try:
+                df = ak.stock_yjbb_em(date=date_str)
+                
+                if df is not None and not df.empty:
+                    # 找到对应股票
+                    stock_row = df[df['股票代码'] == code]
+                    
+                    if not stock_row.empty:
+                        eps = pd.to_numeric(stock_row['每股收益'].iloc[0], errors='coerce')
+                        if not pd.isna(eps):
+                            eps_by_year[year] = eps
+                
+                # 延时防限流
+                time.sleep(0.1)
+                
+            except Exception:
+                continue
+        
+        # 构建返回结果
+        result = []
+        for year in sorted(eps_by_year.keys(), reverse=True):
+            result.append({
+                'year': year,
+                'eps': eps_by_year[year]
+            })
+        
+        return result
+
+    except Exception as e:
+        print(f"  EPS历史获取失败 {code}: {e}")
+        return []
+
+
+def calculate_payout_stability_score(code: str) -> tuple:
+    """
+    计算支付率稳定性评分
+    
+    v7.0新增：用于稳定性评分增强
+    
+    参数:
+        code: 股票代码
+    
+    返回:
+        (支付率3年均值, 稳定性评分)
+    """
+    try:
+        # 获取近3年支付率
+        payout_history = get_payout_history(code, years=3)
+        
+        if not payout_history:
+            return (None, 0)
+        
+        # 提取有效支付率
+        valid_payouts = [p['payout'] for p in payout_history if p['payout'] is not None]
+        
+        if not valid_payouts:
+            return (None, 0)
+        
+        payout_3y_avg = sum(valid_payouts) / len(valid_payouts)
+        
+        # 评分分级
+        if payout_3y_avg <= 80:
+            score = 100  # 理想区间
+        elif payout_3y_avg <= 100:
+            score = 80   # 合理区间
+        elif payout_3y_avg <= 150:
+            score = 50   # 警告区间
+        else:
+            score = 0    # 危险区间
+        
+        return (round(payout_3y_avg, 2), score)
+        
+    except Exception as e:
+        print(f"  支付率稳定性评分失败 {code}: {e}")
+        return (None, 0)
+
+
+def detect_dividend_anomaly(code: str, div_ttm: float, div_3y_avg: float = None) -> dict:
+    """
+    检测股息率异常
+    
+    v7.0新增：识别一次性特别分红
+    
+    参数:
+        code: 股票代码
+        div_ttm: TTM股息率
+        div_3y_avg: 3年平均股息率（可选）
+    
+    返回:
+        {
+            'is_anomaly': True/False,
+            'anomaly_type': '特别分红' / '高波动' / '正常',
+            'suggestion': '降权' / '关注' / '通过',
+            'ratio': 异常比率
+        }
+    """
+    try:
+        # 如果未提供3年均值，尝试计算
+        if div_3y_avg is None:
+            div_history = get_dividend_history(code, years=3)
+            if div_history:
+                # 简化：使用分红金额的平均值估算
+                div_amounts = [d['div_per_share'] for d in div_history]
+                avg_div = sum(div_amounts) / len(div_amounts)
+                # 这里需要股价，暂时跳过
+                div_3y_avg = None
+        
+        if div_3y_avg is None or div_3y_avg == 0:
+            return {
+                'is_anomaly': False,
+                'anomaly_type': '数据不足',
+                'suggestion': '通过',
+                'ratio': 0
+            }
+        
+        ratio = div_ttm / div_3y_avg
+        
+        if ratio > 3.0:
+            return {
+                'is_anomaly': True,
+                'anomaly_type': '特别分红',
+                'suggestion': '降权',
+                'ratio': round(ratio, 2)
+            }
+        elif ratio > 2.0:
+            return {
+                'is_anomaly': True,
+                'anomaly_type': '高波动',
+                'suggestion': '关注',
+                'ratio': round(ratio, 2)
+            }
+        else:
+            return {
+                'is_anomaly': False,
+                'anomaly_type': '正常',
+                'suggestion': '通过',
+                'ratio': round(ratio, 2)
+            }
+    
+    except Exception as e:
+        print(f"  股息率异常检测失败 {code}: {e}")
+        return {
+            'is_anomaly': False,
+            'anomaly_type': '检测失败',
+            'suggestion': '通过',
+            'ratio': 0
+        }
 
 
 # ============================================================
@@ -876,10 +1212,10 @@ def merge_all_data() -> pd.DataFrame:
     payout_count = merged['payout_ratio'].notna().sum()
     print(f"  ✓ 成功计算 {payout_count}/{len(merged)} 只股票的支付率", flush=True)
     
-    # v6.16新增：计算负债率
+    # v6.16新增：计算负债率（v6.19移除数量限制）
     print("步骤7/10: 计算负债率...")
     from server.services.financial_calculator import calculate_debt_ratio_batch
-    debt_results = calculate_debt_ratio_batch(candidate_codes[:20], delay=0.3, timeout=10)  # 限制数量避免接口限制
+    debt_results = calculate_debt_ratio_batch(candidate_codes, delay=0.2, timeout=10)
     
     # 转换为DataFrame
     debt_list = []
@@ -891,18 +1227,18 @@ def merge_all_data() -> pd.DataFrame:
         debt_df = pd.DataFrame(debt_list)
         merged = merged.merge(debt_df, on='code', how='left')
         debt_count = merged['debt_ratio'].notna().sum()
-        print(f"  ✓ 成功计算 {debt_count}/{len(candidate_codes[:20])} 只股票的负债率", flush=True)
+        print(f"  ✓ 成功计算 {debt_count}/{len(candidate_codes)} 只股票的负债率", flush=True)
     else:
         merged['debt_ratio'] = None
         print("  ⚠️  负债率计算失败", flush=True)
 
-    # v6.16新增：计算股价历史百分位
+    # v6.16新增：计算股价历史百分位（v6.19移除数量限制）
     print("步骤8/10: 计算股价历史百分位...")
-    price_percentiles = calculate_price_percentile_batch(candidate_codes[:30], days=250)
+    price_percentiles = calculate_price_percentile_batch(candidate_codes, days=250)
     percentile_df = pd.DataFrame(list(price_percentiles.items()), columns=['code', 'price_percentile'])
     merged = merged.merge(percentile_df, on='code', how='left')
     percentile_count = merged['price_percentile'].notna().sum()
-    print(f"  ✓ 成功计算 {percentile_count}/{len(candidate_codes[:30])} 只股票的价格百分位", flush=True)
+    print(f"  ✓ 成功计算 {percentile_count}/{len(candidate_codes)} 只股票的价格百分位", flush=True)
 
     # v6.10新增：获取分红年数
     print("步骤9/10: 获取候选股分红年数（计算分红稳定性）...")
