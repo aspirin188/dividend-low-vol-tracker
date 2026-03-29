@@ -21,6 +21,7 @@ from openpyxl.utils import get_column_letter
 
 from server.services.fetcher import merge_all_data
 from server.services.scorer import filter_stocks, calculate_scores, prepare_results
+from server.services.health_tracker import get_health_tracker  # v6.19新增
 
 bp = Blueprint('main', __name__)
 
@@ -64,7 +65,12 @@ def init_db():
     ''')
 
     # 兼容旧数据库：新增列
-    for col, col_type in [('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), ('market', 'TEXT'), ('pinyin_abbr', 'TEXT'), ('dividend_years', 'INTEGER'), ('roe', 'REAL'), ('debt_ratio', 'REAL')]:
+    for col, col_type in [
+        ('price', 'REAL'), ('pe', 'REAL'), ('pb', 'REAL'), 
+        ('market', 'TEXT'), ('pinyin_abbr', 'TEXT'), 
+        ('dividend_years', 'INTEGER'), ('roe', 'REAL'), ('debt_ratio', 'REAL'),
+        ('price_percentile', 'REAL')  # v6.19新增
+    ]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')
         except sqlite3.OperationalError:
@@ -149,12 +155,24 @@ def stocks():
     - market_cap_range: 市值区间（large≥1000亿 / medium 500-1000亿 / small 100-500亿）
     - div_yield_min: 股息率下限（4 / 6 / 8）
     - market: 市场类型（sh=沪市 / sz=深市 / gem=创业板 / star=科创板）
+    
+    v6.19新增：
+    - roe_min: ROE下限（8 / 10 / 12 / 15）
+    - debt_ratio_max: 负债率上限（60 / 70 / 80 / 85）
+    - payout_min: 支付率下限（30 / 50 / 70）
+    - price_percentile_max: 股价百分位上限（20 / 40 / 60 / 80）
     """
     q = request.args.get('q', '').strip()
     industry = request.args.get('industry', '').strip()
     market_cap_range = request.args.get('market_cap_range', '').strip()
     div_yield_min = request.args.get('div_yield_min', '').strip()
     market = request.args.get('market', '').strip()
+    
+    # v6.19: 高级筛选参数
+    roe_min = request.args.get('roe_min', '').strip()
+    debt_ratio_max = request.args.get('debt_ratio_max', '').strip()
+    payout_min = request.args.get('payout_min', '').strip()
+    price_percentile_max = request.args.get('price_percentile_max', '').strip()
 
     conn = get_db()
     conn.row_factory = sqlite3.Row
@@ -195,6 +213,39 @@ def stocks():
         if market in market_map:
             conditions.append('market = ?')
             params.append(market_map[market])
+    
+    # v6.19: 高级筛选
+    if roe_min:
+        try:
+            min_roe = float(roe_min)
+            conditions.append('roe >= ?')
+            params.append(min_roe)
+        except ValueError:
+            pass
+    
+    if debt_ratio_max:
+        try:
+            max_debt = float(debt_ratio_max)
+            conditions.append('debt_ratio <= ?')
+            params.append(max_debt)
+        except ValueError:
+            pass
+    
+    if payout_min:
+        try:
+            min_payout = float(payout_min)
+            conditions.append('payout_ratio >= ?')
+            params.append(min_payout)
+        except ValueError:
+            pass
+    
+    if price_percentile_max:
+        try:
+            max_percentile = float(price_percentile_max)
+            conditions.append('price_percentile <= ?')
+            params.append(max_percentile)
+        except ValueError:
+            pass
 
     if conditions:
         query = 'SELECT * FROM stock_data WHERE ' + ' AND '.join(conditions) + ' ORDER BY rank'
@@ -212,6 +263,13 @@ def stocks():
     conn.close()
 
     stock_list = [dict(r) for r in rows]
+    
+    # v6.19: 获取健康度数据
+    health_tracker = get_health_tracker()
+    health_data = {
+        'sina_reliability': health_tracker.get_reliability('sina_price'),
+        'tencent_reliability': health_tracker.get_reliability('tencent_price'),
+    }
 
     return jsonify({
         'stocks': stock_list,
@@ -219,6 +277,7 @@ def stocks():
         'total': len(stock_list),
         'data_date': dict(meta)['data_date'] if meta else None,
         'updated_at': dict(meta)['updated_at'] if meta else None,
+        'health': health_data,  # v6.19新增
     })
 
 

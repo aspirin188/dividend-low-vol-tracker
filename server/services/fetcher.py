@@ -701,6 +701,92 @@ def calculate_volatility_batch(codes: list) -> dict:
 
 
 # ============================================================
+# 股价历史百分位计算（v6.16新增）
+# ============================================================
+
+def calculate_price_percentile(code: str, days: int = 250) -> float:
+    """
+    计算股价历史百分位
+    
+    参数:
+        code: 股票代码
+        days: 历史天数（默认250个交易日，约1年）
+    
+    返回:
+        percentile: 0-100之间的数值
+        例如: 80表示当前价格高于历史80%的时间
+    
+    计算逻辑:
+        1. 获取过去250个交易日的收盘价
+        2. 计算当前价格在历史价格中的排名
+        3. 转换为百分位
+    """
+    try:
+        # 获取历史价格
+        df = ak.stock_zh_a_hist(
+            symbol=code,
+            period='daily',
+            start_date=(datetime.now() - timedelta(days=days*2)).strftime('%Y%m%d'),
+            end_date=datetime.now().strftime('%Y%m%d'),
+            adjust='qfq'  # 前复权
+        )
+        
+        if df is None or len(df) == 0:
+            return None
+        
+        # 只取最近days天的数据
+        df = df.tail(days)
+        
+        if len(df) == 0:
+            return None
+        
+        # 当前价格（最新收盘价）
+        current_price = float(df['收盘'].iloc[-1])
+        
+        # 历史价格列表
+        historical_prices = df['收盘'].values
+        
+        # 计算百分位：当前价格高于多少比例的历史价格
+        lower_count = sum(historical_prices < current_price)
+        percentile = (lower_count / len(historical_prices)) * 100
+        
+        return round(percentile, 2)
+        
+    except Exception as e:
+        return None
+
+
+def calculate_price_percentile_batch(codes: list, days: int = 250) -> dict:
+    """
+    批量计算股价历史百分位
+    
+    参数:
+        codes: 股票代码列表
+        days: 历史天数
+    
+    返回:
+        {code: percentile}
+    """
+    result = {}
+    total = len(codes)
+    
+    for i, code in enumerate(codes):
+        percentile = calculate_price_percentile(code, days)
+        if percentile is not None:
+            result[code] = percentile
+        
+        # 显示进度
+        if (i + 1) % 10 == 0:
+            print(f"  价格百分位进度: {i + 1}/{total}")
+        
+        # 防止频率限制
+        if (i + 1) % 5 == 0:
+            time.sleep(0.3)
+    
+    return result
+
+
+# ============================================================
 # 5. 合并数据（优化流程）
 # ============================================================
 
@@ -713,14 +799,16 @@ def merge_all_data() -> pd.DataFrame:
     4. 对候选股自计算TTM股息率
     5. 二次筛选（股息率>=3%）
     6. 对候选股查分红方案 → 股利支付率
-    7. 对候选股计算分红年数 → 分红稳定性（v6.10新增）
-    8. 对候选股计算波动率 → 年化波动率
+    7. 对候选股计算负债率（v6.16新增）
+    8. 对候选股计算股价历史百分位（v6.16新增）
+    9. 对候选股计算分红年数 → 分红稳定性（v6.10新增）
+    10. 对候选股计算波动率 → 年化波动率
     """
-    print("步骤1/8: 获取全A股实时行情...")
+    print("步骤1/10: 获取全A股实时行情...")
     quotes = fetch_all_quotes()
     print(f"  获取 {len(quotes)} 只股票")
 
-    print("步骤2/8: 获取EPS...")
+    print("步骤2/10: 获取EPS...")
     eps_df = fetch_eps_batch()
     print(f"  获取 {len(eps_df)} 只股票的EPS")
 
@@ -744,10 +832,10 @@ def merge_all_data() -> pd.DataFrame:
     ].copy()
 
     candidate_codes = pre_filtered['code'].tolist()
-    print(f"步骤3/8: 初筛后 {len(candidate_codes)} 只候选股（市值≥500亿、EPS>0、非ST）")
+    print(f"步骤3/10: 初筛后 {len(candidate_codes)} 只候选股（市值≥500亿、EPS>0、非ST）")
 
     # 自计算TTM股息率
-    print("步骤4/8: 计算候选股TTM股息率（自计算,这需要几分钟）...")
+    print("步骤4/10: 计算候选股TTM股息率（自计算,这需要几分钟）...")
     prices = dict(zip(pre_filtered['code'], pre_filtered['price']))
     div_yields = calculate_ttm_dividend_batch(candidate_codes, prices)
     print(f"  完成 {len(div_yields)} 只股票的股息率计算")
@@ -763,9 +851,9 @@ def merge_all_data() -> pd.DataFrame:
     ].copy()
 
     candidate_codes = merged['code'].tolist()
-    print(f"步骤5/8: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥3%）")
+    print(f"步骤5/10: 二次筛选后 {len(candidate_codes)} 只候选股（股息率≥3%）")
 
-    print("步骤6/8: 获取分红数据（计算股利支付率）...")
+    print("步骤6/10: 获取分红数据（计算股利支付率）...")
     
     # v6.14修复：使用akshare的stock_fhps_em接口获取分红数据
     # 原因：东方财富RPT_LICO_FN_CPD接口返回空数据
@@ -788,19 +876,42 @@ def merge_all_data() -> pd.DataFrame:
     payout_count = merged['payout_ratio'].notna().sum()
     print(f"  ✓ 成功计算 {payout_count}/{len(merged)} 只股票的支付率", flush=True)
     
-    # v6.14：负债率数据暂时不可用
-    if 'debt_ratio' not in merged.columns:
+    # v6.16新增：计算负债率
+    print("步骤7/10: 计算负债率...")
+    from server.services.financial_calculator import calculate_debt_ratio_batch
+    debt_results = calculate_debt_ratio_batch(candidate_codes[:20], delay=0.3, timeout=10)  # 限制数量避免接口限制
+    
+    # 转换为DataFrame
+    debt_list = []
+    for code, result in debt_results.items():
+        if result and 'debt_ratio' in result:
+            debt_list.append({'code': code, 'debt_ratio': result['debt_ratio']})
+    
+    if debt_list:
+        debt_df = pd.DataFrame(debt_list)
+        merged = merged.merge(debt_df, on='code', how='left')
+        debt_count = merged['debt_ratio'].notna().sum()
+        print(f"  ✓ 成功计算 {debt_count}/{len(candidate_codes[:20])} 只股票的负债率", flush=True)
+    else:
         merged['debt_ratio'] = None
-    print("  ⚠️  负债率数据源暂不可用", flush=True)
+        print("  ⚠️  负债率计算失败", flush=True)
+
+    # v6.16新增：计算股价历史百分位
+    print("步骤8/10: 计算股价历史百分位...")
+    price_percentiles = calculate_price_percentile_batch(candidate_codes[:30], days=250)
+    percentile_df = pd.DataFrame(list(price_percentiles.items()), columns=['code', 'price_percentile'])
+    merged = merged.merge(percentile_df, on='code', how='left')
+    percentile_count = merged['price_percentile'].notna().sum()
+    print(f"  ✓ 成功计算 {percentile_count}/{len(candidate_codes[:30])} 只股票的价格百分位", flush=True)
 
     # v6.10新增：获取分红年数
-    print("步骤7/8: 获取候选股分红年数（计算分红稳定性）...")
+    print("步骤9/10: 获取候选股分红年数（计算分红稳定性）...")
     div_years = get_dividend_years_batch(candidate_codes)
     print(f"  完成 {len(div_years)} 只股票的分红年数计算")
     div_years_df = pd.DataFrame(list(div_years.items()), columns=['code', 'dividend_years'])
     merged = merged.merge(div_years_df, on='code', how='left')
 
-    print("步骤8/8: 计算候选股波动率（这需要几分钟）...")
+    print("步骤10/10: 计算候选股波动率（这需要几分钟）...")
     vols = calculate_volatility_batch(candidate_codes)
     print(f"  完成 {len(vols)} 只股票的波动率计算")
 
