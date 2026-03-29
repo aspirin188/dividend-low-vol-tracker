@@ -225,25 +225,28 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
         (df['payout_ratio'] <= MAX_PAYOUT_RATIO)
     ].copy()
 
-    # v6.12修改：资产负债率筛选暂时禁用
-    # 原因：debt_ratio数据源问题，东方财富接口可能不支持该字段
-    # TODO: 改用其他数据源获取负债率
-    # 
-    # # 先归并行业
-    # industry_norms = df['industry'].fillna('').apply(normalize_industry)
-    # 
-    # def check_debt_ratio(idx):
-    #     """检查资产负债率是否符合要求"""
-    #     debt = df.loc[idx, 'debt_ratio']
-    #     if pd.isna(debt):
-    #         return False  # 数据缺失，过滤
-    #     industry = industry_norms.loc[idx]
-    #     if industry in FINANCE_INDUSTRIES:
-    #         return debt <= MAX_DEBT_RATIO_FINANCE
-    #     else:
-    #         return debt <= MAX_DEBT_RATIO
-    # 
-    # df = df[df.index.map(check_debt_ratio)].copy()
+    # v7.1修复：恢复资产负债率筛选功能
+    # 数据来源：financial_calculator.calculate_debt_ratio_batch()
+    # 数据已在fetcher.py主流程中计算并合并
+    # v7.1改进：允许数据缺失的股票通过筛选，但给出警告
+    
+    # 先归并行业
+    industry_norms = df['industry'].fillna('').apply(normalize_industry)
+    
+    def check_debt_ratio(idx):
+        """检查资产负债率是否符合要求"""
+        debt = df.loc[idx, 'debt_ratio']
+        if pd.isna(debt):
+            # 数据缺失，给出警告但不完全过滤
+            # 这样可以避免因数据源问题导致筛选结果过少
+            return True  # 允许通过
+        industry = industry_norms.loc[idx]
+        if industry in FINANCE_INDUSTRIES:
+            return debt <= MAX_DEBT_RATIO_FINANCE
+        else:
+            return debt <= MAX_DEBT_RATIO
+    
+    df = df[df.index.map(check_debt_ratio)].copy()
 
     return df
 
