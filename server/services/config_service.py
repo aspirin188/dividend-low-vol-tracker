@@ -409,11 +409,58 @@ class ConfigService:
         Returns:
             (是否成功, 消息, 更新数量)
         """
-        # 先校验所有配置
+        # 先校验所有配置的基本规则（类型、范围）
         for key, value in configs.items():
-            is_valid, error_msg = self.validate(key, value)
-            if not is_valid:
-                return False, f"{key}: {error_msg}", 0
+            # 临时禁用权重和校验
+            config = self._cache.get(key)
+            if not config:
+                return False, f"配置项不存在: {key}", 0
+            
+            config_type = config['config_type']
+            min_value = config.get('min_value')
+            max_value = config.get('max_value')
+            
+            # 类型检查
+            try:
+                if config_type == 'float':
+                    num_value = float(value)
+                elif config_type == 'int':
+                    num_value = int(float(value))
+                else:
+                    continue  # 其他类型不校验
+            except (ValueError, TypeError):
+                return False, f"{key}: 值 '{value}' 不是有效的{config_type}类型", 0
+            
+            # 范围检查
+            if min_value is not None:
+                try:
+                    min_num = float(min_value)
+                    if num_value < min_num:
+                        return False, f"{key}: 值 {num_value} 小于最小值 {min_num}", 0
+                except (ValueError, TypeError):
+                    pass
+            
+            if max_value is not None:
+                try:
+                    max_num = float(max_value)
+                    if num_value > max_num:
+                        return False, f"{key}: 值 {num_value} 大于最大值 {max_num}", 0
+                except (ValueError, TypeError):
+                    pass
+        
+        # 特殊处理：权重和校验（需要在所有权重都更新后检查）
+        weight_keys = ['WEIGHT_DIVIDEND', 'WEIGHT_VOL', 'WEIGHT_STABILITY']
+        if any(k in configs for k in weight_keys):
+            # 计算新的权重和
+            weight_sum = 0.0
+            for k in weight_keys:
+                if k in configs:
+                    weight_sum += float(configs[k])
+                else:
+                    weight_sum += self.get_float(k)
+            
+            if abs(weight_sum - 1.0) > 0.001:
+                return False, f"权重之和为 {weight_sum:.2f}，必须等于 1.0", 0
         
         # 批量更新
         conn = sqlite3.connect(self.db_path)
