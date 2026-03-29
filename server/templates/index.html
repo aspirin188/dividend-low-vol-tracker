@@ -293,6 +293,7 @@
         <div class="header-inner">
             <div class="logo">红利低波<span>跟踪系统</span></div>
             <div class="actions">
+                <button class="btn btn-secondary" onclick="window.location.href='/config'">⚙️ 配置</button>
                 <button class="btn btn-secondary" onclick="resetFilters()">复原</button>
                 <button class="btn btn-primary" id="btnRun" onclick="runScan()">运行</button>
                 <button class="btn btn-secondary" id="btnExport" onclick="exportExcel()">导出</button>
@@ -441,6 +442,9 @@
                         <th class="num sortable sorted" data-col="composite_score" onclick="handleSort('composite_score')">
                             综合评分<span class="sort-arrow">↓</span>
                         </th>
+                        <th class="num sortable" data-col="price_percentile" onclick="handleSort('price_percentile')">
+                            股价百分位<span class="sort-arrow">↕</span>
+                        </th>
                         <th class="num sortable" data-col="annual_vol" onclick="handleSort('annual_vol')">
                             波动率(%)<span class="sort-arrow">↕</span>
                         </th>
@@ -459,9 +463,6 @@
                         <th class="num sortable" data-col="debt_ratio" onclick="handleSort('debt_ratio')">
                             负债率(%)<span class="sort-arrow">↕</span>
                         </th>
-                        <th class="num sortable" data-col="price_percentile" onclick="handleSort('price_percentile')">
-                            股价百分位<span class="sort-arrow">↕</span>
-                        </th>
                     </tr>
                 </thead>
                 <tbody id="stockBody"></tbody>
@@ -477,7 +478,7 @@
 </main>
 
 <footer>
-    © 2026 红利低波跟踪系统 v6.17 极简版
+    © 2026 红利低波跟踪系统 v6.19 极简版
 </footer>
 
 <!-- Toast -->
@@ -621,13 +622,13 @@
                 <td class="num">${s.dividend_yield}</td>
                 <td class="num">${s.market_cap}</td>
                 <td class="num score">${s.composite_score}</td>
+                <td class="num">${s.price_percentile != null ? s.price_percentile : '-'}</td>
                 <td class="num">${s.annual_vol}</td>
                 <td class="num">${s.payout_ratio != null ? s.payout_ratio : '-'}</td>
                 <td class="num">${s.eps != null ? s.eps : '-'}</td>
                 <td class="num">${s.dividend_years != null ? s.dividend_years : '-'}</td>
                 <td class="num">${s.roe != null ? s.roe : '-'}</td>
                 <td class="num">${s.debt_ratio != null ? s.debt_ratio : '-'}</td>
-                <td class="num">${s.price_percentile != null ? s.price_percentile : '-'}</td>
             </tr>
         `).join('');
     }

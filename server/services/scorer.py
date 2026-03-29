@@ -5,6 +5,10 @@
   综合评分 = 股息率归一化 × 60% + (1 - 波动率归一化) × 40%
   归一化方式：min-max，映射到 0-100 分
 
+v6.20 重大改造：
+  - 参数化配置：所有硬编码参数改为从配置服务读取
+  - 配置灵活化：用户可通过配置页面调整筛选条件
+
 v6.9 新增：
   - 简拼搜索：计算股票名称拼音首字母缩写
 
@@ -22,20 +26,17 @@ import numpy as np
 from datetime import datetime
 from pypinyin import lazy_pinyin
 
+# v6.20: 导入配置服务
+from server.services.config_service import ConfigService
+
 
 # ============================================================
-# 硬性筛选条件
+# v6.20: 参数化配置（从配置服务读取，废弃硬编码）
 # ============================================================
-
-MIN_DIVIDEND_YIELD = 3.0   # 股息率 ≥ 3%
-MAX_DIVIDEND_YIELD = 30.0   # 股息率 ≤ 30%（异常数据过滤）
-MIN_MARKET_CAP = 500.0      # 总市值 ≥ 500 亿
-MAX_PAYOUT_RATIO = 150.0    # 股利支付率 ≤ 150%
-MIN_EPS = 0.0               # EPS > 0
-MIN_DIVIDEND_YEARS = 3      # 连续分红年数 ≥ 3年
-MIN_ROE = 8.0               # ROE ≥ 8%（v6.11新增）
-MAX_DEBT_RATIO = 70.0       # 资产负债率 ≤ 70%（v6.11新增）
-MAX_DEBT_RATIO_FINANCE = 85.0  # 金融地产资产负债率 ≤ 85%（v6.11新增）
+# 以下常量已废弃，保留仅供参考
+# MIN_DIVIDEND_YIELD = 3.0
+# MIN_MARKET_CAP = 500.0
+# ...
 
 # 金融地产行业列表（用于资产负债率差异化筛选）
 FINANCE_INDUSTRIES = {'金融', '地产基建'}
@@ -170,14 +171,29 @@ def get_pinyin_abbr(name: str) -> str:
         return ''
 
 
-def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
+def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFrame:
     """
-    硬性筛选：股息率≥3%、市值≥500亿、支付率≤150%、EPS>0、非ST、连续分红≥3年、ROE≥8%、负债率≤70%(金融地产≤85%)。
-
+    硬性筛选：股息率≥X%、市值≥Y亿、支付率≤Z%、EPS>0、非ST、连续分红≥N年、ROE≥M%、负债率≤P%。
+    
     原则：宁可少，不可错。数据不全直接过滤。
-
+    
+    v6.20改造：所有参数从配置服务读取
     v6.11新增：ROE、资产负债率筛选
     """
+    # v6.20: 从配置服务获取参数
+    if config is None:
+        config = ConfigService.get_instance()
+    
+    MIN_DIVIDEND_YIELD = config.get_float('MIN_DIVIDEND_YIELD')
+    MAX_DIVIDEND_YIELD = config.get_float('MAX_DIVIDEND_YIELD')
+    MIN_MARKET_CAP = config.get_float('MIN_MARKET_CAP')
+    MAX_PAYOUT_RATIO = config.get_float('MAX_PAYOUT_RATIO')
+    MIN_EPS = 0.0  # EPS固定为0
+    MIN_DIVIDEND_YEARS = config.get_int('MIN_DIVIDEND_YEARS')
+    MIN_ROE = config.get_float('MIN_ROE')
+    MAX_DEBT_RATIO = config.get_float('MAX_DEBT_RATIO')
+    MAX_DEBT_RATIO_FINANCE = config.get_float('MAX_DEBT_RATIO_FINANCE')
+    
     # 排除 ST
     df = df[~df['name'].str.contains('ST', case=False, na=False)]
 
@@ -199,7 +215,7 @@ def filter_stocks(df: pd.DataFrame) -> pd.DataFrame:
         (df['basic_eps'].notna()) &
         (df['dividend_years'] >= MIN_DIVIDEND_YEARS) &
         (df['roe'].notna()) &
-        (df['roe'] >= MIN_ROE)  # v6.11新增：ROE≥8%
+        (df['roe'] >= MIN_ROE)
     ].copy()
 
     # 股利支付率筛选（允许为空但不超过上限）
@@ -260,15 +276,17 @@ def min_max_normalize(values: np.ndarray, target: float) -> float:
 # 综合评分（v6.10 三因子模型）
 # ============================================================
 
-WEIGHT_DIVIDEND = 0.5      # 股息率权重（v6.10: 0.6 → 0.5）
-WEIGHT_VOL = 0.3           # 波动率权重（v6.10: 0.4 → 0.3）
-WEIGHT_STABILITY = 0.2     # 分红稳定性权重（v6.10新增）
+# v6.20: 权重从配置服务读取，以下常量已废弃
+# WEIGHT_DIVIDEND = 0.5
+# WEIGHT_VOL = 0.3
+# WEIGHT_STABILITY = 0.2
 
 
-def calculate_scores(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFrame:
     """
-    三因子评分：股息率 50% + 波动率(取反) 30% + 分红稳定性 20%。
-
+    三因子评分：股息率 X% + 波动率(取反) Y% + 分红稳定性 Z%。
+    
+    v6.20改造：权重从配置服务读取
     v6.10升级：两因子 → 三因子
     - 股息率：min-max归一化
     - 波动率：min-max归一化后取反（越低越好）
@@ -276,6 +294,14 @@ def calculate_scores(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df.empty:
         return df
+    
+    # v6.20: 从配置服务获取权重
+    if config is None:
+        config = ConfigService.get_instance()
+    
+    WEIGHT_DIVIDEND = config.get_float('WEIGHT_DIVIDEND')
+    WEIGHT_VOL = config.get_float('WEIGHT_VOL')
+    WEIGHT_STABILITY = config.get_float('WEIGHT_STABILITY')
 
     div_values = df['dividend_yield_ttm'].values
     vol_values = df['annual_vol'].values
@@ -334,6 +360,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
 
+    v6.19 更新：
+    - 新增 price_percentile 字段（股价历史百分位）
+
     v6.11 更新：
     - 新增 roe、debt_ratio 字段
 
@@ -355,7 +384,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
             'code', 'name', 'industry', 'market', 'dividend_yield', 'annual_vol',
             'composite_score', 'rank', 'market_cap', 'payout_ratio', 'eps',
             'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years', 'roe', 'debt_ratio',
-            'data_date', 'updated_at'
+            'price_percentile', 'data_date', 'updated_at'
         ])
 
     # 行业归并
@@ -368,7 +397,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
     # 确保数值字段是数值类型（v6.12修复）
-    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio']:
+    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -391,6 +420,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'dividend_years': df['dividend_years'].astype(int),
         'roe': df['roe'].round(2),
         'debt_ratio': df['debt_ratio'].round(2),
+        'price_percentile': df['price_percentile'].round(2),
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })

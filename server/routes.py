@@ -1,7 +1,13 @@
 """
 路由 — 红利低波跟踪系统
 
-4 个 API：
+v6.20 新增配置管理：
+  GET  /config           → 配置管理页面
+  GET  /api/config       → 获取所有配置
+  PUT  /api/config/batch → 批量更新配置
+  POST /api/config/reset → 恢复默认值
+
+原有 API：
   GET  /          → 渲染首页
   POST /api/run   → 一键运行（同步，超时10分钟）
   GET  /api/stocks→ 获取标的列表（支持搜索和行业筛选）
@@ -22,6 +28,7 @@ from openpyxl.utils import get_column_letter
 from server.services.fetcher import merge_all_data
 from server.services.scorer import filter_stocks, calculate_scores, prepare_results
 from server.services.health_tracker import get_health_tracker  # v6.19新增
+from server.services.config_service import ConfigService  # v6.20新增
 
 bp = Blueprint('main', __name__)
 
@@ -360,3 +367,176 @@ def export():
         as_attachment=True,
         download_name=filename,
     )
+
+
+# ============================================================
+# v6.20 配置管理
+# ============================================================
+
+@bp.route('/config')
+def config_page():
+    """配置管理页面"""
+    return render_template('config.html')
+
+
+@bp.route('/api/config', methods=['GET'])
+def get_config():
+    """
+    获取所有配置
+    
+    返回按分类组织的配置列表
+    """
+    try:
+        config_service = ConfigService.get_instance()
+        configs = config_service.get_all()
+        
+        return jsonify({
+            'success': True,
+            'data': configs,
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+        }), 500
+
+
+@bp.route('/api/config/batch', methods=['PUT'])
+def batch_update_config():
+    """
+    批量更新配置
+    
+    Body: {"configs": {"MIN_DIVIDEND_YIELD": "2.5", ...}}
+    
+    更新后会自动重新运行
+    """
+    try:
+        data = request.get_json()
+        configs = data.get('configs', {})
+        
+        if not configs:
+            return jsonify({
+                'success': False,
+                'error': '未提供配置项',
+            }), 400
+        
+        config_service = ConfigService.get_instance()
+        success, message, count = config_service.batch_update(configs)
+        
+        if not success:
+            return jsonify({
+                'success': False,
+                'error': message,
+            }), 400
+        
+        # 自动重新运行
+        try:
+            merged = merge_all_data()
+            if not merged.empty:
+                filtered = filter_stocks(merged)
+                if not filtered.empty:
+                    scored = calculate_scores(filtered)
+                    result = prepare_results(scored)
+                    
+                    conn = get_db()
+                    conn.execute('DELETE FROM stock_data')
+                    result.to_sql('stock_data', conn, if_exists='append', index=False)
+                    conn.commit()
+                    conn.close()
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': f'配置已更新，股票池已刷新（{len(result)}只）',
+                        'updated_count': count,
+                        'pool_size': len(result),
+                    })
+        except Exception as e:
+            print(f"自动运行失败: {e}")
+            return jsonify({
+                'success': True,
+                'message': f'配置已更新（{count}项），但自动运行失败: {str(e)}',
+                'updated_count': count,
+                'pool_size': 0,
+            })
+        
+        return jsonify({
+            'success': True,
+            'message': '配置已更新',
+            'updated_count': count,
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+        }), 500
+
+
+@bp.route('/api/config/reset', methods=['POST'])
+def reset_config():
+    """
+    恢复默认值
+    
+    Body: {"category": "A筛选"} 或 {"all": true}
+    
+    恢复后会自动重新运行
+    """
+    try:
+        data = request.get_json()
+        category = data.get('category')
+        reset_all = data.get('all', False)
+        
+        config_service = ConfigService.get_instance()
+        
+        if reset_all:
+            count = config_service.reset_to_default()
+            message = f'已恢复所有默认值（{count}项）'
+        elif category:
+            count = config_service.reset_to_default(category)
+            message = f'已恢复{category}的默认值（{count}项）'
+        else:
+            return jsonify({
+                'success': False,
+                'error': '请指定 category 或 all',
+            }), 400
+        
+        # 自动重新运行
+        try:
+            merged = merge_all_data()
+            if not merged.empty:
+                filtered = filter_stocks(merged)
+                if not filtered.empty:
+                    scored = calculate_scores(filtered)
+                    result = prepare_results(scored)
+                    
+                    conn = get_db()
+                    conn.execute('DELETE FROM stock_data')
+                    result.to_sql('stock_data', conn, if_exists='append', index=False)
+                    conn.commit()
+                    conn.close()
+                    
+                    return jsonify({
+                        'success': True,
+                        'message': f'{message}，股票池已刷新（{len(result)}只）',
+                        'reset_count': count,
+                        'pool_size': len(result),
+                    })
+        except Exception as e:
+            print(f"自动运行失败: {e}")
+            return jsonify({
+                'success': True,
+                'message': f'{message}，但自动运行失败: {str(e)}',
+                'reset_count': count,
+            })
+        
+        return jsonify({
+            'success': True,
+            'message': message,
+            'reset_count': count,
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+        }), 500

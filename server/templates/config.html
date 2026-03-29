@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>系统配置 - 红利低波跟踪系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #f5f5f7;
+            --card: #ffffff;
+            --text: #1d1d1f;
+            --text-secondary: #6e6e73;
+            --text-tertiary: #8e8e93;
+            --accent: #0071e3;
+            --accent-hover: #0077ed;
+            --success: #34c759;
+            --warning: #ff9f0a;
+            --danger: #ff3b30;
+            --border: #e5e5ea;
+            --radius: 12px;
+            --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container { max-width: 900px; margin: 0 auto; padding: 24px 16px; }
+
+        /* ===== Header ===== */
+        header {
+            background: var(--card);
+            border-bottom: 1px solid var(--border);
+            position: sticky; top: 0; z-index: 100;
+            backdrop-filter: blur(20px);
+            background: rgba(255,255,255,0.85);
+        }
+        .header-inner {
+            display: flex; align-items: center; justify-content: space-between;
+            height: 56px; max-width: 900px; margin: 0 auto; padding: 0 16px;
+        }
+        .logo {
+            font-size: 17px; font-weight: 600; letter-spacing: -0.3px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .logo span { color: var(--accent); }
+        .back-link {
+            font-size: 14px; color: var(--accent); text-decoration: none;
+            display: flex; align-items: center; gap: 4px;
+        }
+        .back-link:hover { text-decoration: underline; }
+
+        /* ===== Page Title ===== */
+        .page-title {
+            margin: 32px 0 24px;
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .page-title h1 {
+            font-size: 28px; font-weight: 700; letter-spacing: -0.5px;
+        }
+        .page-actions { display: flex; gap: 8px; }
+
+        /* ===== Buttons ===== */
+        .btn {
+            padding: 8px 16px; border-radius: 8px; border: none;
+            font-size: 13px; font-weight: 500; cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex; align-items: center; gap: 6px;
+        }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover:not(:disabled) { background: var(--accent-hover); transform: translateY(-1px); }
+        .btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover:not(:disabled) { background: #ebebed; }
+        .btn-danger { background: var(--danger); color: #fff; }
+        .btn-danger:hover:not(:disabled) { opacity: 0.9; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        /* ===== Config Section ===== */
+        .config-section {
+            background: var(--card);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+        .section-header {
+            padding: 16px 20px;
+            background: #fafafa;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .section-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 500;
+        }
+        .section-body { padding: 20px; }
+
+        /* ===== Config Item ===== */
+        .config-item {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--border);
+        }
+        .config-item:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+        .config-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .config-unit {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            font-weight: 400;
+        }
+        .config-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .config-input {
+            flex: 0 0 100px;
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: 'SF Mono', Monaco, monospace;
+            text-align: right;
+            transition: all 0.2s;
+        }
+        .config-input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(0,113,227,0.1);
+        }
+        .config-input.error {
+            border-color: var(--danger);
+            background: #fff5f5;
+        }
+        .config-range {
+            font-size: 12px;
+            color: var(--text-tertiary);
+        }
+        .config-desc {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            padding-left: 12px;
+            border-left: 3px solid var(--border);
+            margin-top: 8px;
+        }
+
+        /* ===== Weight Sum ===== */
+        .weight-sum {
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 14px;
+        }
+        .weight-sum.ok { color: var(--success); }
+        .weight-sum.error { color: var(--danger); }
+
+        /* ===== Tip Box ===== */
+        .tip-box {
+            padding: 12px 16px;
+            background: #e3f2fd;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #1976d2;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* ===== Footer Actions ===== */
+        .footer-actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-top: 32px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* ===== Toast ===== */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            padding: 12px 20px;
+            background: var(--text);
+            color: #fff;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            opacity: 0;
+            transition: all 0.3s ease;
+            z-index: 1000;
+        }
+        .toast.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+        }
+        .toast.success { background: var(--success); }
+        .toast.error { background: var(--danger); }
+
+        /* ===== Loading ===== */
+        .loading {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255,255,255,0.9);
+            z-index: 999;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .loading.show { display: flex; }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .loading-text {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-inner">
+            <div class="logo">
+                <span>⚙️</span> 系统配置
+            </div>
+            <a href="/" class="back-link">← 返回主页</a>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="page-title">
+            <h1>参数配置</h1>
+            <div class="page-actions">
+                <button class="btn btn-secondary" onclick="resetAll()">恢复默认</button>
+            </div>
+        </div>
+
+        <div class="tip-box">
+            💡 提示：修改配置后点击【保存配置】，系统将自动重新运行并更新股票池
+        </div>
+
+        <!-- A类：筛选参数 -->
+        <div class="config-section">
+            <div class="section-header">
+                <h2>📊 筛选参数</h2>
+                <span class="section-badge">A类</span>
+            </div>
+            <div class="section-body" id="configs-A筛选">
+                <!-- 动态生成 -->
+            </div>
+        </div>
+
+        <!-- B类：风控参数 -->
+        <div class="config-section">
+            <div class="section-header">
+                <h2>🛡️ 风控参数</h2>
+                <span class="section-badge">B类</span>
+            </div>
+            <div class="section-body" id="configs-B风控">
+                <!-- 动态生成 -->
+            </div>
+        </div>
+
+        <!-- C类：评分权重 -->
+        <div class="config-section">
+            <div class="section-header">
+                <h2>⚖️ 评分权重</h2>
+                <span class="section-badge">C类</span>
+            </div>
+            <div class="section-body">
+                <div class="weight-sum" id="weightSum">
+                    <span>权重和：<strong id="weightSumValue">1.00</strong></span>
+                    <span id="weightSumStatus">✓</span>
+                </div>
+                <div id="configs-C权重">
+                    <!-- 动态生成 -->
+                </div>
+            </div>
+        </div>
+
+        <div class="footer-actions">
+            <button class="btn btn-secondary" onclick="window.location.href='/'">取消</button>
+            <button class="btn btn-primary" onclick="saveConfigs()">保存配置</button>
+        </div>
+    </div>
+
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div class="loading-text">正在更新配置并刷新股票池...</div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        let configs = {};
+
+        // 加载配置
+        async function loadConfigs() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                
+                if (data.success) {
+                    configs = data.data;
+                    renderConfigs();
+                } else {
+                    showToast('加载配置失败: ' + data.error, 'error');
+                }
+            } catch (e) {
+                showToast('加载配置失败: ' + e.message, 'error');
+            }
+        }
+
+        // 渲染配置项
+        function renderConfigs() {
+            const categories = ['A筛选', 'B风控', 'C权重'];
+            
+            categories.forEach(cat => {
+                const container = document.getElementById('configs-' + cat);
+                if (!container || !configs[cat]) return;
+                
+                let html = '';
+                configs[cat].forEach(item => {
+                    html += `
+                        <div class="config-item">
+                            <div class="config-label">
+                                ${getParamName(item.config_key)}
+                                <span class="config-unit">${item.unit || ''}</span>
+                            </div>
+                            <div class="config-row">
+                                <input type="number" 
+                                       class="config-input" 
+                                       id="${item.config_key}"
+                                       value="${item.config_value}"
+                                       min="${item.min_value || ''}"
+                                       max="${item.max_value || ''}"
+                                       step="${item.config_type === 'int' ? '1' : '0.1'}"
+                                       onchange="validateInput('${item.config_key}')">
+                                <span class="config-range">范围: ${item.min_value || '-'} ~ ${item.max_value || '-'}</span>
+                            </div>
+                            <div class="config-desc">${item.description}</div>
+                        </div>
+                    `;
+                });
+                
+                if (cat === 'C权重') {
+                    // C类权重在weight-sum后面插入
+                    const weightSumDiv = container.previousElementSibling;
+                    weightSumDiv.insertAdjacentHTML('afterend', html);
+                } else {
+                    container.innerHTML = html;
+                }
+            });
+            
+            // 计算权重和
+            updateWeightSum();
+        }
+
+        // 获取参数名称
+        function getParamName(key) {
+            const names = {
+                'MIN_DIVIDEND_YIELD': '股息率下限',
+                'MIN_MARKET_CAP': '市值下限',
+                'MIN_ROE': 'ROE下限',
+                'MIN_DIVIDEND_YEARS': '分红年数下限',
+                'MAX_PAYOUT_RATIO': '股利支付率上限',
+                'MAX_DIVIDEND_YIELD': '股息率上限',
+                'MAX_DEBT_RATIO': '资产负债率上限',
+                'MAX_DEBT_RATIO_FINANCE': '资产负债率上限(金融)',
+                'WEIGHT_DIVIDEND': '股息率权重',
+                'WEIGHT_VOL': '波动率权重',
+                'WEIGHT_STABILITY': '分红稳定性权重',
+            };
+            return names[key] || key;
+        }
+
+        // 校验输入
+        function validateInput(key) {
+            const input = document.getElementById(key);
+            const value = parseFloat(input.value);
+            const min = parseFloat(input.min);
+            const max = parseFloat(input.max);
+            
+            if (isNaN(value)) {
+                input.classList.add('error');
+                return false;
+            }
+            
+            if (!isNaN(min) && value < min) {
+                input.classList.add('error');
+                showToast(`${getParamName(key)} 不能小于 ${min}`, 'error');
+                return false;
+            }
+            
+            if (!isNaN(max) && value > max) {
+                input.classList.add('error');
+                showToast(`${getParamName(key)} 不能大于 ${max}`, 'error');
+                return false;
+            }
+            
+            input.classList.remove('error');
+            
+            // 更新权重和
+            if (key.startsWith('WEIGHT_')) {
+                updateWeightSum();
+            }
+            
+            return true;
+        }
+
+        // 更新权重和
+        function updateWeightSum() {
+            const w1 = parseFloat(document.getElementById('WEIGHT_DIVIDEND').value) || 0;
+            const w2 = parseFloat(document.getElementById('WEIGHT_VOL').value) || 0;
+            const w3 = parseFloat(document.getElementById('WEIGHT_STABILITY').value) || 0;
+            
+            const sum = w1 + w2 + w3;
+            const sumValue = document.getElementById('weightSumValue');
+            const sumStatus = document.getElementById('weightSumStatus');
+            const sumDiv = document.getElementById('weightSum');
+            
+            sumValue.textContent = sum.toFixed(2);
+            
+            if (Math.abs(sum - 1.0) < 0.001) {
+                sumDiv.classList.remove('error');
+                sumDiv.classList.add('ok');
+                sumStatus.textContent = '✓';
+            } else {
+                sumDiv.classList.remove('ok');
+                sumDiv.classList.add('error');
+                sumStatus.textContent = '✗ 权重之和必须等于 1.0';
+            }
+        }
+
+        // 保存配置
+        async function saveConfigs() {
+            // 收集所有配置
+            const newConfigs = {};
+            const categories = ['A筛选', 'B风控', 'C权重'];
+            
+            for (const cat of categories) {
+                if (!configs[cat]) continue;
+                
+                for (const item of configs[cat]) {
+                    const input = document.getElementById(item.config_key);
+                    if (!input) continue;
+                    
+                    if (!validateInput(item.config_key)) {
+                        showToast('请检查输入值', 'error');
+                        return;
+                    }
+                    
+                    newConfigs[item.config_key] = input.value;
+                }
+            }
+            
+            // 显示加载
+            document.getElementById('loading').classList.add('show');
+            
+            try {
+                const res = await fetch('/api/config/batch', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ configs: newConfigs }),
+                });
+                
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    
+                    // 延迟跳转
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1500);
+                } else {
+                    showToast('保存失败: ' + data.error, 'error');
+                }
+            } catch (e) {
+                showToast('保存失败: ' + e.message, 'error');
+            } finally {
+                document.getElementById('loading').classList.remove('show');
+            }
+        }
+
+        // 恢复默认
+        async function resetAll() {
+            if (!confirm('确定要恢复所有配置为默认值吗？')) {
+                return;
+            }
+            
+            document.getElementById('loading').classList.add('show');
+            
+            try {
+                const res = await fetch('/api/config/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ all: true }),
+                });
+                
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    
+                    // 重新加载配置
+                    await loadConfigs();
+                    
+                    // 延迟跳转
+                    setTimeout(() => {
+                        window.location.href = '/';
+                    }, 1500);
+                } else {
+                    showToast('恢复失败: ' + data.error, 'error');
+                }
+            } catch (e) {
+                showToast('恢复失败: ' + e.message, 'error');
+            } finally {
+                document.getElementById('loading').classList.remove('show');
+            }
+        }
+
+        // Toast 提示
+        function showToast(message, type = 'success') {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.className = 'toast ' + type + ' show';
+            
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        // 页面加载时初始化
+        loadConfigs();
+    </script>
+</body>
+</html>
