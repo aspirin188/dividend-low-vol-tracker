@@ -85,7 +85,14 @@ def init_db():
         ('top1_shareholder_ratio', 'REAL'),
         ('strike_zone_score', 'REAL'),
         ('strike_zone_rating', 'TEXT'),
-        ('strike_zone', 'TEXT')
+        ('strike_zone', 'TEXT'),
+        # v7.2.1新增：均线位置
+        ('ma250', 'REAL'),
+        ('price_vs_ma_pct', 'REAL'),
+        ('ma_slope', 'REAL'),
+        ('signal', 'TEXT'),
+        ('signal_level', 'INTEGER'),
+        ('ma_score', 'REAL')
     ]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')
@@ -133,7 +140,9 @@ def run():
             get_operating_cashflow_batch,
             get_top_shareholder_ratio_batch,
             calculate_profit_growth_3y,
-            calculate_cashflow_profit_ratio
+            calculate_cashflow_profit_ratio,
+            calc_ma_position_batch,  # v7.2.1新增
+            is_profit_growing_strict  # v7.2.1新增
         )
         
         candidate_codes = merged['code'].tolist()
@@ -147,10 +156,19 @@ def run():
         # 1.3 获取第一大股东持股比例
         top_shareholder_ratio = get_top_shareholder_ratio_batch(candidate_codes)
         
-        # 1.4 计算并合并数据
+        # 1.4 计算均线位置（v7.2.1新增）
+        print("步骤12: 计算均线位置和买点信号...")
+        ma_data = calc_ma_position_batch(candidate_codes)
+        
+        # 1.5 计算并合并数据
         merged['profit_growth_3y'] = None
         merged['cashflow_profit_ratio'] = None
         merged['top1_shareholder_ratio'] = None
+        merged['ma250'] = None  # v7.2.1新增
+        merged['price_vs_ma_pct'] = None  # v7.2.1新增
+        merged['ma_slope'] = None  # v7.2.1新增
+        merged['signal'] = None  # v7.2.1新增
+        merged['signal_level'] = None  # v7.2.1新增
         
         for code in candidate_codes:
             # 计算净利润增速
@@ -171,6 +189,14 @@ def run():
             # 第一大股东持股比例
             if code in top_shareholder_ratio:
                 merged.loc[merged['code'] == code, 'top1_shareholder_ratio'] = top_shareholder_ratio[code]
+            
+            # 均线位置数据（v7.2.1新增）
+            if code in ma_data:
+                merged.loc[merged['code'] == code, 'ma250'] = ma_data[code]['ma250']
+                merged.loc[merged['code'] == code, 'price_vs_ma_pct'] = ma_data[code]['price_vs_ma_pct']
+                merged.loc[merged['code'] == code, 'ma_slope'] = ma_data[code]['ma_slope']
+                merged.loc[merged['code'] == code, 'signal'] = ma_data[code]['signal']
+                merged.loc[merged['code'] == code, 'signal_level'] = ma_data[code]['signal_level']
         
         print(f"  ✓ 成功获取质量因子数据")
 

@@ -425,6 +425,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
 
+    v7.2.1 更新：
+    - 新增 ma250, price_vs_ma_pct, ma_slope, signal, signal_level, ma_score
+
     v7.2 更新：
     - 新增 profit_growth_3y, cashflow_profit_ratio, top1_shareholder_ratio
     - 新增 strike_zone_score, strike_zone_rating, strike_zone
@@ -458,7 +461,8 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
             'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years', 'roe', 'debt_ratio',
             'price_percentile', 'payout_3y_avg', 'data_date', 'updated_at',
             'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio',
-            'strike_zone_score', 'strike_zone_rating', 'strike_zone'
+            'strike_zone_score', 'strike_zone_rating', 'strike_zone',
+            'ma250', 'price_vs_ma_pct', 'ma_slope', 'signal', 'signal_level', 'ma_score'
         ])
 
     # 行业归并
@@ -471,7 +475,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
     # 确保数值字段是数值类型（v6.12修复）
-    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile', 'payout_3y_avg', 'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio', 'strike_zone_score']:
+    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile', 'payout_3y_avg', 'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio', 'strike_zone_score', 'ma250', 'price_vs_ma_pct', 'ma_slope', 'signal_level', 'ma_score']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -503,6 +507,13 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'strike_zone_score': df['strike_zone_score'] if 'strike_zone_score' in df.columns else None,
         'strike_zone_rating': df['strike_zone_rating'] if 'strike_zone_rating' in df.columns else None,
         'strike_zone': df['strike_zone'] if 'strike_zone' in df.columns else None,
+        # v7.2.1新增
+        'ma250': df['ma250'].round(2) if 'ma250' in df.columns else None,
+        'price_vs_ma_pct': df['price_vs_ma_pct'].round(2) if 'price_vs_ma_pct' in df.columns else None,
+        'ma_slope': df['ma_slope'].round(4) if 'ma_slope' in df.columns else None,
+        'signal': df['signal'] if 'signal' in df.columns else None,
+        'signal_level': df['signal_level'].astype(int) if 'signal_level' in df.columns else None,
+        'ma_score': df['ma_score'] if 'ma_score' in df.columns else None,
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })
@@ -518,9 +529,12 @@ def calculate_strike_zone_score(df: pd.DataFrame) -> pd.DataFrame:
     """
     计算击球区评分
     
+    v7.2.1更新：集成均线位置得分
+    
     评分模型（60分制）:
-    - 价格百分位得分（0-30分）
-    - 估值得分（0-30分）
+    - 价格百分位得分（0-20分）
+    - 估值得分（0-20分）
+    - 均线位置得分（0-20分）⭐ v7.2.1新增
     
     击球区评级:
     - 50-60分 → ⭐⭐⭐⭐⭐ 强击球区
@@ -535,41 +549,55 @@ def calculate_strike_zone_score(df: pd.DataFrame) -> pd.DataFrame:
     # 初始化得分
     price_percentile_scores = []
     valuation_scores = []
+    ma_scores = []  # v7.2.1新增
     total_scores = []
     ratings = []
     zones = []
     
     for idx, row in df.iterrows():
-        # 1. 价格百分位得分（0-30分）
+        # 1. 价格百分位得分（0-20分）
         price_percentile = row.get('price_percentile')
         if pd.isna(price_percentile):
             price_score = 0
         elif price_percentile < 20:
-            price_score = 30
-        elif price_percentile < 30:
             price_score = 20
+        elif price_percentile < 30:
+            price_score = 15
         elif price_percentile < 40:
             price_score = 10
         else:
             price_score = 0
         
-        # 2. 估值得分（0-30分）
-        # 使用PE百分位（需要从PE历史数据计算）
-        # 暂时使用当前PE相对于行业PE的百分位
+        # 2. 估值得分（0-20分）
         pe = row.get('pe')
         if pd.isna(pe) or pe <= 0:
             valuation_score = 0
-        elif pe < 8:  # 低PE
-            valuation_score = 30
-        elif pe < 10:
+        elif pe < 8:
             valuation_score = 20
+        elif pe < 10:
+            valuation_score = 15
         elif pe < 15:
             valuation_score = 10
         else:
             valuation_score = 0
         
+        # 3. 均线位置得分（0-20分）⭐ v7.2.1新增
+        signal_level = row.get('signal_level')
+        if pd.isna(signal_level):
+            ma_score = 0
+        elif signal_level == 5:  # 强烈买入
+            ma_score = 20
+        elif signal_level == 4:  # 买入
+            ma_score = 15
+        elif signal_level == 3:  # 持有
+            ma_score = 10
+        elif signal_level == 2:  # 观望
+            ma_score = 5
+        else:
+            ma_score = 0
+        
         # 总分
-        total_score = price_score + valuation_score
+        total_score = price_score + valuation_score + ma_score
         
         # 评级
         if total_score >= 50:
@@ -590,6 +618,7 @@ def calculate_strike_zone_score(df: pd.DataFrame) -> pd.DataFrame:
         
         price_percentile_scores.append(price_score)
         valuation_scores.append(valuation_score)
+        ma_scores.append(ma_score)
         total_scores.append(total_score)
         ratings.append(rating)
         zones.append(zone)
@@ -597,6 +626,7 @@ def calculate_strike_zone_score(df: pd.DataFrame) -> pd.DataFrame:
     # 添加新字段
     df['price_percentile_score'] = price_percentile_scores
     df['valuation_score'] = valuation_scores
+    df['ma_score'] = ma_scores  # v7.2.1新增
     df['strike_zone_score'] = total_scores
     df['strike_zone_rating'] = ratings
     df['strike_zone'] = zones

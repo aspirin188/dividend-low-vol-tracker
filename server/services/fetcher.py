@@ -1519,3 +1519,120 @@ def calculate_cashflow_profit_ratio(operating_cashflow: float, net_profit: float
         
     except Exception:
         return None
+
+
+def is_profit_growing_strict(profit_history: dict) -> bool:
+    """
+    严格模式：连续3年净利润增长
+    
+    Args:
+        profit_history: {'2022': 100, '2023': 120, '2024': 150, '2025': 180}
+    
+    Returns:
+        True/False
+    """
+    try:
+        years = sorted(profit_history.keys())
+        if len(years) < 3:
+            return False
+        
+        # 取最近3年的利润
+        recent_profits = [profit_history[year] for year in years[-3:]]
+        
+        # 检查连续增长
+        for i in range(len(recent_profits) - 1):
+            if recent_profits[i + 1] < recent_profits[i]:
+                return False
+        
+        return True
+        
+    except Exception:
+        return False
+
+
+def calc_ma_position_batch(stock_codes: list) -> dict:
+    """
+    批量计算均线位置和买点信号
+    
+    Args:
+        stock_codes: 股票代码列表
+    
+    Returns:
+        {
+            code: {
+                'ma250': 32.5,
+                'price_vs_ma_pct': -5.2,
+                'ma_slope': 0.02,
+                'signal': '强烈买入',
+                'signal_level': 5
+            }
+        }
+    """
+    print(f"  计算 {len(stock_codes)} 只股票的均线位置...", flush=True)
+    
+    results = {}
+    
+    for i, code in enumerate(stock_codes, 1):
+        try:
+            # 获取历史价格数据
+            df = ak.stock_zh_a_hist(symbol=code, period='daily', start_date='20240101', end_date='20261231', adjust='qfq')
+            
+            if df.empty or len(df) < 250:
+                continue
+            
+            # 获取收盘价
+            prices = df['收盘'].values
+            
+            if len(prices) < 250:
+                continue
+            
+            # 计算250日均线
+            ma250 = np.mean(prices[-250:])
+            current_price = prices[-1]
+            
+            # 计算均线斜率（60日变化趋势）
+            if len(prices) >= 310:
+                ma60_ago = np.mean(prices[-310:-250])
+                ma_slope = (ma250 - ma60_ago) / ma60_ago
+            else:
+                ma_slope = 0
+            
+            # 计算价格相对均线位置
+            price_vs_ma_pct = (current_price / ma250 - 1) * 100
+            
+            # 生成买点信号
+            if current_price < ma250 * 0.95 and ma_slope > 0:
+                signal = "强烈买入"
+                signal_level = 5  # ⭐⭐⭐⭐⭐
+            elif current_price < ma250 * 1.02 and abs(ma_slope) < 0.02:
+                signal = "买入"
+                signal_level = 4  # ⭐⭐⭐⭐
+            elif current_price > ma250 * 1.05 and ma_slope > 0:
+                signal = "持有"
+                signal_level = 3  # ⭐⭐⭐
+            elif current_price < ma250 * 0.95 and ma_slope < 0:
+                signal = "观望"
+                signal_level = 2  # ⭐⭐
+            else:
+                signal = "观望"
+                signal_level = 1  # ⭐
+            
+            results[code] = {
+                'ma250': round(ma250, 2),
+                'price_vs_ma_pct': round(price_vs_ma_pct, 2),
+                'ma_slope': round(ma_slope, 4),
+                'signal': signal,
+                'signal_level': signal_level
+            }
+                
+        except Exception as e:
+            if i % 100 == 0:
+                print(f"    处理进度: {i}/{len(stock_codes)}", flush=True)
+            continue
+        
+        # 延迟避免限流
+        if i % 10 == 0:
+            time.sleep(0.1)
+    
+    print(f"  ✓ 成功计算 {len(results)}/{len(stock_codes)} 只股票的均线位置", flush=True)
+    return results

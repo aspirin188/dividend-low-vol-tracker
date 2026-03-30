@@ -187,6 +187,17 @@ class ConfigService:
             'unit': '%',
         },
         {
+            'config_key': 'PROFIT_GROWTH_MODE',
+            'config_value': 'cagr',
+            'config_type': 'str',
+            'category': 'D质量',
+            'description': '净利润增长判断模式。cagr=复合增长率（允许单年波动），strict=连续增长（每年必须增长）。strict模式更严格排除周期股',
+            'default_value': 'cagr',
+            'min_value': None,
+            'max_value': None,
+            'unit': '-',
+        },
+        {
             'config_key': 'ENABLE_CASHFLOW_QUALITY_FILTER',
             'config_value': 'true',
             'config_type': 'bool',
