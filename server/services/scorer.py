@@ -248,6 +248,47 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     df = df[df.index.map(check_debt_ratio)].copy()
 
+    # v7.2新增：质量因子增强筛选
+    
+    # 1. 净利润增速筛选
+    if config.get('ENABLE_PROFIT_GROWTH_FILTER'):
+        min_profit_growth = config.get('MIN_PROFIT_GROWTH_3Y') / 100  # 转换为小数
+        
+        def check_profit_growth(idx):
+            """检查近3年净利润增速"""
+            growth = df.loc[idx, 'profit_growth_3y']
+            if pd.isna(growth):
+                return True  # 数据缺失，允许通过
+            return growth >= min_profit_growth
+        
+        df = df[df.index.map(check_profit_growth)].copy()
+    
+    # 2. 现金流质量筛选
+    if config.get('ENABLE_CASHFLOW_QUALITY_FILTER'):
+        min_cashflow_ratio = config.get('MIN_CASHFLOW_PROFIT_RATIO')
+        
+        def check_cashflow_quality(idx):
+            """检查现金流质量"""
+            ratio = df.loc[idx, 'cashflow_profit_ratio']
+            if pd.isna(ratio):
+                return True  # 数据缺失，允许通过
+            return ratio >= min_cashflow_ratio
+        
+        df = df[df.index.map(check_cashflow_quality)].copy()
+    
+    # 3. 股权结构稳定性筛选
+    if config.get('ENABLE_SHAREHOLDER_STABILITY_FILTER'):
+        min_shareholder_ratio = config.get('MIN_TOP1_SHAREHOLDER_RATIO')
+        
+        def check_shareholder_stability(idx):
+            """检查股权结构稳定性"""
+            ratio = df.loc[idx, 'top1_shareholder_ratio']
+            if pd.isna(ratio):
+                return True  # 数据缺失，允许通过
+            return ratio >= min_shareholder_ratio
+        
+        df = df[df.index.map(check_shareholder_stability)].copy()
+
     return df
 
 
@@ -384,6 +425,10 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     """
     整理最终结果，只保留需要入库的字段。
 
+    v7.2 更新：
+    - 新增 profit_growth_3y, cashflow_profit_ratio, top1_shareholder_ratio
+    - 新增 strike_zone_score, strike_zone_rating, strike_zone
+
     v7.0 更新：
     - 新增 payout_3y_avg 字段（支付率3年均值）
 
@@ -411,7 +456,9 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
             'code', 'name', 'industry', 'market', 'dividend_yield', 'annual_vol',
             'composite_score', 'rank', 'market_cap', 'payout_ratio', 'eps',
             'price', 'pe', 'pb', 'pinyin_abbr', 'dividend_years', 'roe', 'debt_ratio',
-            'price_percentile', 'payout_3y_avg', 'data_date', 'updated_at'
+            'price_percentile', 'payout_3y_avg', 'data_date', 'updated_at',
+            'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio',
+            'strike_zone_score', 'strike_zone_rating', 'strike_zone'
         ])
 
     # 行业归并
@@ -424,7 +471,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
     # 确保数值字段是数值类型（v6.12修复）
-    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile', 'payout_3y_avg']:
+    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile', 'payout_3y_avg', 'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio', 'strike_zone_score']:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -449,8 +496,109 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'debt_ratio': df['debt_ratio'].round(2),
         'price_percentile': df['price_percentile'].round(2),
         'payout_3y_avg': df['payout_3y_avg'].round(2) if 'payout_3y_avg' in df.columns else None,
+        # v7.2新增
+        'profit_growth_3y': df['profit_growth_3y'].round(4) if 'profit_growth_3y' in df.columns else None,
+        'cashflow_profit_ratio': df['cashflow_profit_ratio'].round(2) if 'cashflow_profit_ratio' in df.columns else None,
+        'top1_shareholder_ratio': df['top1_shareholder_ratio'].round(4) if 'top1_shareholder_ratio' in df.columns else None,
+        'strike_zone_score': df['strike_zone_score'] if 'strike_zone_score' in df.columns else None,
+        'strike_zone_rating': df['strike_zone_rating'] if 'strike_zone_rating' in df.columns else None,
+        'strike_zone': df['strike_zone'] if 'strike_zone' in df.columns else None,
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })
 
     return result
+
+
+# ============================================================
+# v7.2新增：击球区评分
+# ============================================================
+
+def calculate_strike_zone_score(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    计算击球区评分
+    
+    评分模型（60分制）:
+    - 价格百分位得分（0-30分）
+    - 估值得分（0-30分）
+    
+    击球区评级:
+    - 50-60分 → ⭐⭐⭐⭐⭐ 强击球区
+    - 40-50分 → ⭐⭐⭐⭐ 弱击球区
+    - 30-40分 → ⭐⭐⭐ 观察区
+    - 20-30分 → ⭐⭐ 观望区
+    - 0-20分 → ⭐ 高估区
+    """
+    if df.empty:
+        return df
+    
+    # 初始化得分
+    price_percentile_scores = []
+    valuation_scores = []
+    total_scores = []
+    ratings = []
+    zones = []
+    
+    for idx, row in df.iterrows():
+        # 1. 价格百分位得分（0-30分）
+        price_percentile = row.get('price_percentile')
+        if pd.isna(price_percentile):
+            price_score = 0
+        elif price_percentile < 20:
+            price_score = 30
+        elif price_percentile < 30:
+            price_score = 20
+        elif price_percentile < 40:
+            price_score = 10
+        else:
+            price_score = 0
+        
+        # 2. 估值得分（0-30分）
+        # 使用PE百分位（需要从PE历史数据计算）
+        # 暂时使用当前PE相对于行业PE的百分位
+        pe = row.get('pe')
+        if pd.isna(pe) or pe <= 0:
+            valuation_score = 0
+        elif pe < 8:  # 低PE
+            valuation_score = 30
+        elif pe < 10:
+            valuation_score = 20
+        elif pe < 15:
+            valuation_score = 10
+        else:
+            valuation_score = 0
+        
+        # 总分
+        total_score = price_score + valuation_score
+        
+        # 评级
+        if total_score >= 50:
+            rating = '⭐⭐⭐⭐⭐'
+            zone = '强击球区'
+        elif total_score >= 40:
+            rating = '⭐⭐⭐⭐'
+            zone = '弱击球区'
+        elif total_score >= 30:
+            rating = '⭐⭐⭐'
+            zone = '观察区'
+        elif total_score >= 20:
+            rating = '⭐⭐'
+            zone = '观望区'
+        else:
+            rating = '⭐'
+            zone = '高估区'
+        
+        price_percentile_scores.append(price_score)
+        valuation_scores.append(valuation_score)
+        total_scores.append(total_score)
+        ratings.append(rating)
+        zones.append(zone)
+    
+    # 添加新字段
+    df['price_percentile_score'] = price_percentile_scores
+    df['valuation_score'] = valuation_scores
+    df['strike_zone_score'] = total_scores
+    df['strike_zone_rating'] = ratings
+    df['strike_zone'] = zones
+    
+    return df

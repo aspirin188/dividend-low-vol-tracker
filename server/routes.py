@@ -16,6 +16,7 @@ v6.20 新增配置管理：
 
 import os
 import sqlite3
+import pandas as pd
 from io import BytesIO
 from flask import (
     Blueprint, render_template, request, jsonify, send_file,
@@ -77,7 +78,14 @@ def init_db():
         ('market', 'TEXT'), ('pinyin_abbr', 'TEXT'), 
         ('dividend_years', 'INTEGER'), ('roe', 'REAL'), ('debt_ratio', 'REAL'),
         ('price_percentile', 'REAL'),  # v6.19新增
-        ('payout_3y_avg', 'REAL')  # v7.0新增
+        ('payout_3y_avg', 'REAL'),  # v7.0新增
+        # v7.2新增：质量因子增强
+        ('profit_growth_3y', 'REAL'),
+        ('cashflow_profit_ratio', 'REAL'),
+        ('top1_shareholder_ratio', 'REAL'),
+        ('strike_zone_score', 'REAL'),
+        ('strike_zone_rating', 'TEXT'),
+        ('strike_zone', 'TEXT')
     ]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')
@@ -106,6 +114,10 @@ def run():
     """
     一键运行：获取数据 → 筛选 → 评分 → 保存。
     同步执行，前端超时设为 600s。
+    
+    v7.2更新：
+    - 新增质量因子数据获取（净利润增速、现金流、股东持股）
+    - 新增击球区评分计算
     """
     try:
         # 1. 合并所有数据
@@ -113,6 +125,54 @@ def run():
 
         if merged.empty:
             return jsonify({'success': False, 'error': '未获取到任何数据，请检查网络'})
+
+        # v7.2新增：获取质量因子增强数据
+        print("步骤11: 获取质量因子增强数据...")
+        from server.services.fetcher import (
+            get_profit_history_batch,
+            get_operating_cashflow_batch,
+            get_top_shareholder_ratio_batch,
+            calculate_profit_growth_3y,
+            calculate_cashflow_profit_ratio
+        )
+        
+        candidate_codes = merged['code'].tolist()
+        
+        # 1.1 获取净利润历史数据
+        profit_history = get_profit_history_batch(candidate_codes, years=4)
+        
+        # 1.2 获取经营现金流数据
+        operating_cashflow = get_operating_cashflow_batch(candidate_codes)
+        
+        # 1.3 获取第一大股东持股比例
+        top_shareholder_ratio = get_top_shareholder_ratio_batch(candidate_codes)
+        
+        # 1.4 计算并合并数据
+        merged['profit_growth_3y'] = None
+        merged['cashflow_profit_ratio'] = None
+        merged['top1_shareholder_ratio'] = None
+        
+        for code in candidate_codes:
+            # 计算净利润增速
+            if code in profit_history:
+                growth = calculate_profit_growth_3y(profit_history[code])
+                if growth is not None:
+                    merged.loc[merged['code'] == code, 'profit_growth_3y'] = growth
+            
+            # 计算现金流质量
+            if code in operating_cashflow:
+                # 从merged中获取净利润
+                net_profit = merged.loc[merged['code'] == code, 'basic_eps'].values[0]
+                if pd.notna(net_profit) and net_profit > 0:
+                    ratio = calculate_cashflow_profit_ratio(operating_cashflow[code], net_profit * 1e8)  # EPS转净利润
+                    if ratio is not None:
+                        merged.loc[merged['code'] == code, 'cashflow_profit_ratio'] = ratio
+            
+            # 第一大股东持股比例
+            if code in top_shareholder_ratio:
+                merged.loc[merged['code'] == code, 'top1_shareholder_ratio'] = top_shareholder_ratio[code]
+        
+        print(f"  ✓ 成功获取质量因子数据")
 
         # 2. 硬性筛选
         filtered = filter_stocks(merged)
@@ -123,6 +183,10 @@ def run():
 
         # 3. 评分
         scored = calculate_scores(filtered)
+        
+        # v7.2新增：计算击球区评分
+        from server.services.scorer import calculate_strike_zone_score
+        scored = calculate_strike_zone_score(scored)
 
         # 4. 整理并保存
         result = prepare_results(scored)
@@ -145,6 +209,8 @@ def run():
 
     except Exception as e:
         print(f"运行失败: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)})
 
 

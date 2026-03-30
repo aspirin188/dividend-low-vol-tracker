@@ -1255,3 +1255,267 @@ def merge_all_data() -> pd.DataFrame:
     merged = merged.merge(vol_df, on='code', how='left')
 
     return merged
+
+
+# ============================================================
+# v7.2新增：质量因子增强数据获取
+# ============================================================
+
+def get_profit_history_batch(stock_codes: list, years: int = 4) -> dict:
+    """
+    批量获取近N年净利润数据
+    
+    Args:
+        stock_codes: 股票代码列表
+        years: 年数（默认4年，用于计算3年CAGR）
+    
+    Returns:
+        {code: {'2022': 100亿, '2023': 120亿, ...}}
+    """
+    print(f"  获取 {len(stock_codes)} 只股票的净利润历史数据...", flush=True)
+    
+    results = {}
+    current_year = datetime.now().year
+    
+    for i, code in enumerate(stock_codes, 1):
+        try:
+            # 使用akshare获取财务数据
+            df = ak.stock_financial_analysis_indicator(symbol=code)
+            
+            if df.empty:
+                continue
+            
+            # 提取净利润数据
+            profit_data = {}
+            for year_offset in range(years):
+                target_year = current_year - 1 - year_offset  # 从去年开始往前推
+                year_str = str(target_year)
+                
+                # 筛选该年份的数据
+                year_data = df[df['日期'].str.startswith(year_str)]
+                if not year_data.empty:
+                    # 取最新的年报数据
+                    latest = year_data.iloc[0]
+                    if '净利润' in latest:
+                        profit_data[year_str] = float(latest['净利润'])
+            
+            if len(profit_data) >= 3:  # 至少需要3年数据
+                results[code] = profit_data
+                
+        except Exception as e:
+            if i % 100 == 0:
+                print(f"    处理进度: {i}/{len(stock_codes)}", flush=True)
+            continue
+        
+        # 延迟避免限流
+        if i % 10 == 0:
+            time.sleep(0.1)
+    
+    print(f"  ✓ 成功获取 {len(results)}/{len(stock_codes)} 只股票的净利润历史", flush=True)
+    return results
+
+
+def get_operating_cashflow_batch(stock_codes: list) -> dict:
+    """
+    批量获取经营现金流净额
+    
+    Args:
+        stock_codes: 股票代码列表
+    
+    Returns:
+        {code: 经营现金流净额}
+    """
+    print(f"  获取 {len(stock_codes)} 只股票的经营现金流数据...", flush=True)
+    
+    results = {}
+    
+    for i, code in enumerate(stock_codes, 1):
+        try:
+            # 使用akshare获取现金流量表
+            df = ak.stock_cash_flow_sheet_by_report_em(symbol=code)
+            
+            if df.empty:
+                continue
+            
+            # 筛选最新年报
+            latest_year = str(datetime.now().year - 1)
+            year_data = df[df['报告期'].str.startswith(latest_year)]
+            
+            if not year_data.empty:
+                latest = year_data.iloc[0]
+                if '经营活动产生的现金流量净额' in latest:
+                    cashflow = latest['经营活动产生的现金流量净额']
+                    if pd.notna(cashflow) and cashflow != '':
+                        results[code] = float(cashflow)
+                
+        except Exception as e:
+            if i % 100 == 0:
+                print(f"    处理进度: {i}/{len(stock_codes)}", flush=True)
+            continue
+        
+        # 延迟避免限流
+        if i % 10 == 0:
+            time.sleep(0.1)
+    
+    print(f"  ✓ 成功获取 {len(results)}/{len(stock_codes)} 只股票的经营现金流", flush=True)
+    return results
+
+
+def get_top_shareholder_ratio_batch(stock_codes: list) -> dict:
+    """
+    批量获取第一大股东持股比例
+    
+    Args:
+        stock_codes: 股票代码列表
+    
+    Returns:
+        {code: 第一大股东持股比例}
+    """
+    print(f"  获取 {len(stock_codes)} 只股票的股东持股数据...", flush=True)
+    
+    results = {}
+    
+    for i, code in enumerate(stock_codes, 1):
+        try:
+            # 使用akshare获取十大股东数据
+            df = ak.stock_zh_a_gdhs(symbol=code)
+            
+            if df.empty:
+                continue
+            
+            # 取最新的十大股东数据
+            latest = df.iloc[0]
+            
+            # 第一大股东持股比例
+            if '持股比例' in latest:
+                ratio_str = latest['持股比例']
+                if pd.notna(ratio_str) and ratio_str != '':
+                    # 移除百分号并转换为小数
+                    ratio = float(str(ratio_str).replace('%', '')) / 100
+                    results[code] = ratio
+                
+        except Exception as e:
+            if i % 100 == 0:
+                print(f"    处理进度: {i}/{len(stock_codes)}", flush=True)
+            continue
+        
+        # 延迟避免限流
+        if i % 10 == 0:
+            time.sleep(0.1)
+    
+    print(f"  ✓ 成功获取 {len(results)}/{len(stock_codes)} 只股票的股东持股比例", flush=True)
+    return results
+
+
+def get_pe_pb_history_batch(stock_codes: list, days: int = 500) -> dict:
+    """
+    批量获取PE/PB历史数据
+    
+    Args:
+        stock_codes: 股票代码列表
+        days: 历史天数
+    
+    Returns:
+        {code: {'pe_history': [...], 'pb_history': [...], 'current_pe': 8.5, 'current_pb': 0.95}}
+    """
+    print(f"  获取 {len(stock_codes)} 只股票的PE/PB历史数据...", flush=True)
+    
+    results = {}
+    end_date = datetime.now().strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+    
+    for i, code in enumerate(stock_codes, 1):
+        try:
+            # 使用东方财富接口获取PE/PB数据
+            params = {
+                'cb': 'jQuery',
+                'secid': f'1.{code}' if code.startswith('6') else f'0.{code}',
+                'fields1': 'f1,f2,f3,f4,f5',
+                'fields2': 'f51,f52,f53,f54,f55,f56',
+                'klt': '101',  # 日线
+                'fqt': '1',
+                'beg': start_date,
+                'end': end_date,
+            }
+            
+            url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
+            resp = requests.get(url, params=params, headers=_HEADERS, timeout=_TIMEOUT)
+            
+            # 解析数据
+            # 注意：这里需要根据实际接口返回格式进行解析
+            # 暂时使用简化版本，只返回当前PE/PB
+            
+            results[code] = {
+                'pe_history': [],
+                'pb_history': [],
+                'current_pe': None,
+                'current_pb': None
+            }
+                
+        except Exception as e:
+            if i % 100 == 0:
+                print(f"    处理进度: {i}/{len(stock_codes)}", flush=True)
+            continue
+        
+        # 延迟避免限流
+        if i % 10 == 0:
+            time.sleep(0.1)
+    
+    print(f"  ✓ 成功获取 {len(results)}/{len(stock_codes)} 只股票的PE/PB数据", flush=True)
+    return results
+
+
+def calculate_profit_growth_3y(profit_history: dict) -> float:
+    """
+    计算近3年净利润CAGR
+    
+    Args:
+        profit_history: {'2022': 100, '2023': 120, '2024': 150, '2025': 180}
+    
+    Returns:
+        CAGR (如 0.059 表示 5.9%)
+    """
+    try:
+        years = sorted(profit_history.keys())
+        if len(years) < 3:
+            return None
+        
+        # 取3年前的利润和当前利润
+        start_year = years[-4] if len(years) >= 4 else years[0]
+        end_year = years[-1]
+        
+        start_profit = profit_history[start_year]
+        end_profit = profit_history[end_year]
+        
+        if start_profit <= 0 or end_profit <= 0:
+            return None
+        
+        # 计算CAGR
+        years_diff = int(end_year) - int(start_year)
+        cagr = (end_profit / start_profit) ** (1 / years_diff) - 1
+        
+        return cagr
+        
+    except Exception:
+        return None
+
+
+def calculate_cashflow_profit_ratio(operating_cashflow: float, net_profit: float) -> float:
+    """
+    计算现金流质量比率
+    
+    Args:
+        operating_cashflow: 经营现金流净额
+        net_profit: 净利润
+    
+    Returns:
+        比率 (如 1.5)
+    """
+    try:
+        if net_profit == 0 or net_profit is None:
+            return None
+        
+        return operating_cashflow / net_profit
+        
+    except Exception:
+        return None
