@@ -1,6 +1,11 @@
 """
 路由 — 红利低波跟踪系统
 
+v8.0 新增：
+  GET  /api/config/strategies   → 获取预设策略列表
+  POST /api/config/strategies  → 应用预设策略
+  GET  /api/config/history     → 获取参数历史记录
+
 v6.20 新增配置管理：
   GET  /config           → 配置管理页面
   GET  /api/config       → 获取所有配置
@@ -88,10 +93,17 @@ def init_db():
         ('strike_zone', 'TEXT'),
         # v7.2.1新增：均线位置
         ('ma250', 'REAL'),
+        ('ma20', 'REAL'),  # v7.3新增
+        ('ma60', 'REAL'),  # v7.3新增
+        ('current_price', 'REAL'),  # v7.3新增
         ('price_vs_ma_pct', 'REAL'),
         ('ma_slope', 'REAL'),
+        ('trend', 'TEXT'),  # v7.3新增：趋势方向
+        ('trend_strength', 'TEXT'),  # v7.3新增：趋势强度
         ('signal', 'TEXT'),
         ('signal_level', 'INTEGER'),
+        ('signal_type', 'TEXT'),  # v7.3新增：信号类型 buy/sell/hold
+        ('action', 'TEXT'),  # v7.3新增：操作建议
         ('ma_score', 'REAL')
     ]:
         try:
@@ -165,10 +177,17 @@ def run():
         merged['cashflow_profit_ratio'] = None
         merged['top1_shareholder_ratio'] = None
         merged['ma250'] = None  # v7.2.1新增
+        merged['ma20'] = None  # v7.3新增
+        merged['ma60'] = None  # v7.3新增
+        merged['current_price'] = None  # v7.3新增
         merged['price_vs_ma_pct'] = None  # v7.2.1新增
         merged['ma_slope'] = None  # v7.2.1新增
+        merged['trend'] = None  # v7.3新增
+        merged['trend_strength'] = None  # v7.3新增
         merged['signal'] = None  # v7.2.1新增
         merged['signal_level'] = None  # v7.2.1新增
+        merged['signal_type'] = None  # v7.3新增
+        merged['action'] = None  # v7.3新增
         
         for code in candidate_codes:
             # 计算净利润增速
@@ -190,13 +209,20 @@ def run():
             if code in top_shareholder_ratio:
                 merged.loc[merged['code'] == code, 'top1_shareholder_ratio'] = top_shareholder_ratio[code]
             
-            # 均线位置数据（v7.2.1新增）
+            # 均线位置数据（v7.2.1新增，v7.3升级）
             if code in ma_data:
                 merged.loc[merged['code'] == code, 'ma250'] = ma_data[code]['ma250']
+                merged.loc[merged['code'] == code, 'ma20'] = ma_data[code]['ma20']  # v7.3新增
+                merged.loc[merged['code'] == code, 'ma60'] = ma_data[code]['ma60']  # v7.3新增
+                merged.loc[merged['code'] == code, 'current_price'] = ma_data[code]['current_price']  # v7.3新增
                 merged.loc[merged['code'] == code, 'price_vs_ma_pct'] = ma_data[code]['price_vs_ma_pct']
                 merged.loc[merged['code'] == code, 'ma_slope'] = ma_data[code]['ma_slope']
+                merged.loc[merged['code'] == code, 'trend'] = ma_data[code]['trend']  # v7.3新增
+                merged.loc[merged['code'] == code, 'trend_strength'] = ma_data[code]['trend_strength']  # v7.3新增
                 merged.loc[merged['code'] == code, 'signal'] = ma_data[code]['signal']
                 merged.loc[merged['code'] == code, 'signal_level'] = ma_data[code]['signal_level']
+                merged.loc[merged['code'] == code, 'signal_type'] = ma_data[code]['signal_type']  # v7.3新增
+                merged.loc[merged['code'] == code, 'action'] = ma_data[code]['action']  # v7.3新增
         
         print(f"  ✓ 成功获取质量因子数据")
 
@@ -628,6 +654,93 @@ def reset_config():
             'reset_count': count,
         })
         
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+        }), 500
+
+
+# ==================== v8.0 新增 API ====================
+
+@bp.route('/api/config/strategies', methods=['GET'])
+def get_strategies():
+    """
+    获取预设策略列表
+    """
+    try:
+        config_service = ConfigService.get_instance()
+        strategies = config_service.get_preset_strategies()
+        current = config_service.get_current_strategy()
+        
+        return jsonify({
+            'success': True,
+            'strategies': strategies,
+            'current': current,
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+        }), 500
+
+
+@bp.route('/api/config/strategies', methods=['POST'])
+def apply_strategy():
+    """
+    应用预设策略
+    
+    Body: {"strategy_id": "conservative", "reason": "追求稳定收益"}
+    """
+    try:
+        data = request.get_json()
+        strategy_id = data.get('strategy_id')
+        reason = data.get('reason', '')
+        
+        if not strategy_id:
+            return jsonify({
+                'success': False,
+                'error': '请指定 strategy_id',
+            }), 400
+        
+        config_service = ConfigService.get_instance()
+        success, message = config_service.apply_preset_strategy(strategy_id, reason)
+        
+        if not success:
+            return jsonify({
+                'success': False,
+                'error': message,
+            }), 400
+        
+        return jsonify({
+            'success': True,
+            'message': message,
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+        }), 500
+
+
+@bp.route('/api/config/history', methods=['GET'])
+def get_config_history():
+    """
+    获取参数历史记录
+    
+    Query: ?key=xxx&limit=50
+    """
+    try:
+        key = request.args.get('key')
+        limit = request.args.get('limit', 50, type=int)
+        
+        config_service = ConfigService.get_instance()
+        history = config_service.get_config_history(key, limit)
+        
+        return jsonify({
+            'success': True,
+            'history': history,
+        })
     except Exception as e:
         return jsonify({
             'success': False,

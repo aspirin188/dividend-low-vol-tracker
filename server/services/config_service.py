@@ -1,11 +1,13 @@
 """
-配置管理服务 — 红利低波跟踪系统 (v6.20)
+配置管理服务 — 红利低波跟踪系统 (v8.0)
 
 功能：
   - 参数化配置管理
   - 内存缓存加速
   - 参数校验
   - 默认值恢复
+  - 预设策略模板（v8.0新增）
+  - 参数历史记录（v8.0新增）
 
 设计原则：
   - 单例模式，全局唯一
@@ -16,6 +18,82 @@
 import os
 import sqlite3
 from typing import Dict, Tuple, Optional, Any
+from datetime import datetime
+
+
+# v8.0新增：预设策略模板
+PRESET_STRATEGIES = {
+    'conservative': {
+        'name': '保守型',
+        'description': '低波动、高分红、稳定优先',
+        'params': {
+            'MIN_DIVIDEND_YIELD': '4.0',    # 提高门槛
+            'MIN_MARKET_CAP': '800',        # 只选大盘
+            'MIN_ROE': '10.0',              # 高盈利
+            'MIN_DIVIDEND_YEARS': '5',      # 严格分红
+            'MAX_DEBT_RATIO': '60',         # 低负债
+            'WEIGHT_DIVIDEND': '0.6',       # 强调分红
+            'WEIGHT_VOL': '0.3',            # 重视波动
+            'WEIGHT_STABILITY': '0.1',
+        }
+    },
+    'balanced': {
+        'name': '均衡型',
+        'description': '兼顾收益与风险的平衡策略',
+        'params': {
+            'MIN_DIVIDEND_YIELD': '3.0',
+            'MIN_MARKET_CAP': '500',
+            'MIN_ROE': '8.0',
+            'MIN_DIVIDEND_YEARS': '3',
+            'MAX_DEBT_RATIO': '70',
+            'WEIGHT_DIVIDEND': '0.5',
+            'WEIGHT_VOL': '0.3',
+            'WEIGHT_STABILITY': '0.2',
+        }
+    },
+    'aggressive': {
+        'name': '激进型',
+        'description': '追求高收益，愿意承担较大波动',
+        'params': {
+            'MIN_DIVIDEND_YIELD': '2.0',    # 降低门槛
+            'MIN_MARKET_CAP': '300',        # 扩大范围
+            'MIN_ROE': '6.0',               # 放宽盈利
+            'MIN_DIVIDEND_YEARS': '2',
+            'MAX_DEBT_RATIO': '80',         # 放宽负债
+            'WEIGHT_DIVIDEND': '0.4',       # 降低分红权重
+            'WEIGHT_VOL': '0.4',            # 重视波动
+            'WEIGHT_STABILITY': '0.2',
+        }
+    },
+    'high_dividend': {
+        'name': '高股息',
+        'description': '专注于最高股息率股票',
+        'params': {
+            'MIN_DIVIDEND_YIELD': '4.5',    # 高股息门槛
+            'MIN_MARKET_CAP': '500',
+            'MIN_ROE': '5.0',               # 放宽ROE
+            'MIN_DIVIDEND_YEARS': '3',
+            'MAX_DEBT_RATIO': '75',
+            'WEIGHT_DIVIDEND': '0.7',       # 最高股息权重
+            'WEIGHT_VOL': '0.15',
+            'WEIGHT_STABILITY': '0.15',
+        }
+    },
+    'value': {
+        'name': '低估型',
+        'description': '偏好低估值、高性价比股票',
+        'params': {
+            'MIN_DIVIDEND_YIELD': '2.5',
+            'MIN_MARKET_CAP': '400',
+            'MIN_ROE': '10.0',              # 高ROE
+            'MIN_DIVIDEND_YEARS': '4',      # 稳定分红
+            'MAX_DEBT_RATIO': '65',
+            'WEIGHT_DIVIDEND': '0.35',
+            'WEIGHT_VOL': '0.35',           # 重视波动
+            'WEIGHT_STABILITY': '0.3',     # 重视稳定性
+        }
+    },
+}
 
 
 class ConfigService:
@@ -295,6 +373,29 @@ class ConfigService:
             )
         ''')
         
+        # v8.0新增：创建参数历史记录表
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS config_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                config_key VARCHAR(50) NOT NULL,
+                old_value VARCHAR(100),
+                new_value VARCHAR(100),
+                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT,
+                changed_by TEXT DEFAULT 'system'
+            )
+        ''')
+        
+        # v8.0新增：创建当前策略记录表
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS current_strategy (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                strategy_id VARCHAR(30),
+                strategy_name VARCHAR(50),
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
         # 插入默认配置（如果不存在）
         for config in self.CONFIG_DEFINITIONS:
             try:
@@ -459,13 +560,14 @@ class ConfigService:
         
         return True, ""
     
-    def update(self, key: str, value: str) -> Tuple[bool, str]:
+    def update(self, key: str, value: str, reason: str = '') -> Tuple[bool, str]:
         """
         更新配置值
         
         Args:
             key: 配置键名
             value: 配置值
+            reason: 变更原因（v8.0新增）
             
         Returns:
             (是否成功, 消息)
@@ -475,12 +577,22 @@ class ConfigService:
         if not is_valid:
             return False, error_msg
         
+        # 记录旧值（用于历史记录）
+        old_value = self._cache[key]['config_value']
+        
         # 更新数据库
         conn = sqlite3.connect(self.db_path)
         conn.execute(
             'UPDATE system_config SET config_value = ?, updated_at = CURRENT_TIMESTAMP WHERE config_key = ?',
             (value, key)
         )
+        
+        # v8.0新增：记录变更历史
+        conn.execute('''
+            INSERT INTO config_history (config_key, old_value, new_value, reason)
+            VALUES (?, ?, ?, ?)
+        ''', (key, old_value, value, reason))
+        
         conn.commit()
         conn.close()
         
@@ -602,3 +714,112 @@ class ConfigService:
         conn.close()
         
         return count
+    
+    # ==================== v8.0 新增功能 ====================
+    
+    def get_preset_strategies(self) -> Dict[str, dict]:
+        """
+        获取所有预设策略
+        
+        Returns:
+            {strategy_id: {name, description, params}}
+        """
+        return PRESET_STRATEGIES
+    
+    def apply_preset_strategy(self, strategy_id: str, reason: str = '') -> Tuple[bool, str]:
+        """
+        应用预设策略
+        
+        Args:
+            strategy_id: 策略ID（如 'conservative', 'balanced' 等）
+            reason: 应用原因
+            
+        Returns:
+            (是否成功, 消息)
+        """
+        if strategy_id not in PRESET_STRATEGIES:
+            return False, f"未知的策略ID: {strategy_id}"
+        
+        strategy = PRESET_STRATEGIES[strategy_id]
+        params = strategy['params']
+        
+        # 批量更新参数
+        success, msg, count = self.batch_update(params)
+        if not success:
+            return False, f"应用策略失败: {msg}"
+        
+        # 记录当前策略
+        conn = sqlite3.connect(self.db_path)
+        conn.execute('''
+            INSERT OR REPLACE INTO current_strategy (id, strategy_id, strategy_name, updated_at)
+            VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+        ''', (strategy_id, strategy['name']))
+        conn.commit()
+        conn.close()
+        
+        return True, f"已应用策略: {strategy['name']}，更新了 {count} 个参数"
+    
+    def get_current_strategy(self) -> Optional[Dict[str, str]]:
+        """
+        获取当前应用的策略
+        
+        Returns:
+            {strategy_id, strategy_name} 或 None
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute('SELECT * FROM current_strategy WHERE id = 1').fetchone()
+        conn.close()
+        
+        if row:
+            return dict(row)
+        return None
+    
+    def record_config_change(self, key: str, old_value: str, new_value: str, reason: str = ''):
+        """
+        记录参数变更历史
+        
+        Args:
+            key: 配置键
+            old_value: 旧值
+            new_value: 新值
+            reason: 变更原因
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.execute('''
+            INSERT INTO config_history (config_key, old_value, new_value, reason)
+            VALUES (?, ?, ?, ?)
+        ''', (key, old_value, new_value, reason))
+        conn.commit()
+        conn.close()
+    
+    def get_config_history(self, key: str = None, limit: int = 50) -> list:
+        """
+        获取参数变更历史
+        
+        Args:
+            key: 配置键，None表示所有
+            limit: 返回条数
+            
+        Returns:
+            [{config_key, old_value, new_value, changed_at, reason}, ...]
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        
+        if key:
+            rows = conn.execute('''
+                SELECT * FROM config_history 
+                WHERE config_key = ?
+                ORDER BY changed_at DESC
+                LIMIT ?
+            ''', (key, limit)).fetchall()
+        else:
+            rows = conn.execute('''
+                SELECT * FROM config_history 
+                ORDER BY changed_at DESC
+                LIMIT ?
+            ''', (limit,)).fetchall()
+        
+        conn.close()
+        return [dict(row) for row in rows]

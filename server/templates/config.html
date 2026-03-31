@@ -110,6 +110,50 @@
             font-weight: 500;
         }
         .section-body { padding: 20px; }
+        .section-desc {
+            color: var(--text-secondary);
+            font-size: 13px;
+            margin-bottom: 16px;
+        }
+
+        /* ===== Strategy Grid ===== */
+        .strategy-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 12px;
+        }
+        .strategy-card {
+            padding: 14px;
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .strategy-card:hover {
+            border-color: var(--accent);
+            background: #f8f9fa;
+        }
+        .strategy-card.active {
+            border-color: var(--accent);
+            background: #eaf4ff;
+        }
+        .strategy-card-name {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 4px;
+        }
+        .strategy-card-desc {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .current-strategy {
+            margin-top: 12px;
+            padding: 10px;
+            background: #e8f5e9;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #2e7d32;
+        }
 
         /* ===== Config Item ===== */
         .config-item {
@@ -290,6 +334,23 @@
             💡 提示：修改配置后点击【保存配置】，系统将自动重新运行并更新股票池
         </div>
 
+        <!-- v8.0新增：预设策略 -->
+        <div class="config-section">
+            <div class="section-header">
+                <h2>🎯 预设策略</h2>
+                <span class="section-badge">NEW</span>
+            </div>
+            <div class="section-body">
+                <p class="section-desc">选择预设策略快速应用一套参数，或手动调整各参数</p>
+                <div class="strategy-grid" id="strategy-grid">
+                    <!-- 动态生成 -->
+                </div>
+                <div class="current-strategy" id="current-strategy" style="display: none;">
+                    当前策略：<span id="current-strategy-name"></span>
+                </div>
+            </div>
+        </div>
+
         <!-- A类：筛选参数 -->
         <div class="config-section">
             <div class="section-header">
@@ -348,17 +409,73 @@
         // 加载配置
         async function loadConfigs() {
             try {
-                const res = await fetch('/api/config');
-                const data = await res.json();
+                // 并行加载配置和预设策略
+                const [configRes, strategyRes] = await Promise.all([
+                    fetch('/api/config'),
+                    fetch('/api/config/strategies')
+                ]);
                 
-                if (data.success) {
-                    configs = data.data;
+                const configData = await configRes.json();
+                const strategyData = await strategyRes.json();
+                
+                if (configData.success) {
+                    configs = configData.data;
                     renderConfigs();
                 } else {
-                    showToast('加载配置失败: ' + data.error, 'error');
+                    showToast('加载配置失败: ' + configData.error, 'error');
+                }
+                
+                if (strategyData.success) {
+                    renderStrategies(strategyData.strategies, strategyData.current);
                 }
             } catch (e) {
                 showToast('加载配置失败: ' + e.message, 'error');
+            }
+        }
+
+        // 渲染预设策略
+        function renderStrategies(strategies, current) {
+            const grid = document.getElementById('strategy-grid');
+            let html = '';
+            
+            for (const [id, s] of Object.entries(strategies)) {
+                const active = current && current.strategy_id === id ? 'active' : '';
+                html += `
+                    <div class="strategy-card ${active}" onclick="applyStrategy('${id}')">
+                        <div class="strategy-card-name">${s.name}</div>
+                        <div class="strategy-card-desc">${s.description}</div>
+                    </div>
+                `;
+            }
+            grid.innerHTML = html;
+            
+            // 显示当前策略
+            const currentDiv = document.getElementById('current-strategy');
+            if (current) {
+                currentDiv.style.display = 'block';
+                document.getElementById('current-strategy-name').textContent = current.strategy_name;
+            }
+        }
+
+        // 应用预设策略
+        async function applyStrategy(strategyId) {
+            try {
+                showToast('正在应用策略...', 'info');
+                const res = await fetch('/api/config/strategies', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({strategy_id: strategyId})
+                });
+                const data = await res.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    loadConfigs();  // 重新加载配置
+                } else {
+                    showToast('应用策略失败: ' + data.error, 'error');
+                }
+            } catch (e) {
+                showToast('应用策略失败: ' + e.message, 'error');
             }
         }
 
