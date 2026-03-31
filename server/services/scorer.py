@@ -252,7 +252,7 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     # 1. 净利润增速筛选
     if config.get('ENABLE_PROFIT_GROWTH_FILTER'):
-        min_profit_growth = float(config.get('MIN_PROFIT_GROWTH_3Y', 0)) / 100  # 转换为小数
+        min_profit_growth = config.get_float('MIN_PROFIT_GROWTH_3Y') / 100  # 转换为小数
         
         def check_profit_growth(idx):
             """检查近3年净利润增速"""
@@ -265,7 +265,7 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     # 2. 现金流质量筛选
     if config.get('ENABLE_CASHFLOW_QUALITY_FILTER'):
-        min_cashflow_ratio = float(config.get('MIN_CASHFLOW_PROFIT_RATIO', 0))
+        min_cashflow_ratio = config.get_float('MIN_CASHFLOW_PROFIT_RATIO')
         
         def check_cashflow_quality(idx):
             """检查现金流质量"""
@@ -278,7 +278,7 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     # 3. 股权结构稳定性筛选
     if config.get('ENABLE_SHAREHOLDER_STABILITY_FILTER'):
-        min_shareholder_ratio = float(config.get('MIN_TOP1_SHAREHOLDER_RATIO', 0))
+        min_shareholder_ratio = config.get_float('MIN_TOP1_SHAREHOLDER_RATIO')
         
         def check_shareholder_stability(idx):
             """检查股权结构稳定性"""
