@@ -332,3 +332,40 @@ def calculate_ttm_dividend_batch(codes, prices):
 def get_dividend_years_batch(codes):
     """兼容性函数"""
     return {code: 5 for code in codes}
+
+
+# ============================================================
+# v7.2 质量因子增强函数（兼容性桩）
+# ============================================================
+
+def get_profit_history_batch(stock_codes, years=4):
+    """获取净利润历史（兼容性桩）"""
+    return {}
+
+def get_operating_cashflow_batch(stock_codes):
+    """获取经营现金流（兼容性桩）"""
+    return {}
+
+def get_top_shareholder_ratio_batch(stock_codes):
+    """获取第一大股东持股比例（兼容性桩）"""
+    return {}
+
+def calculate_profit_growth_3y(profit_history):
+    """计算3年利润增长率（兼容性桩）"""
+    return None
+
+def calculate_cashflow_profit_ratio(operating_cashflow, net_profit):
+    """计算现金流质量比率（兼容性桩）"""
+    return None
+
+def calc_ma_position_batch(stock_codes):
+    """计算均线位置（兼容性桩）"""
+    return {}
+
+def is_profit_growing_strong(profit_history, min_cagr=0.1):
+    """判断利润是否强劲增长（兼容性桩）"""
+    return False
+
+def is_profit_growing_strict(profit_history, min_cagr=0.05, min_years=3):
+    """严格判断利润增长（兼容性桩）"""
+    return False
