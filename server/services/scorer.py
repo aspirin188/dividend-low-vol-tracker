@@ -252,7 +252,7 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     # 1. 净利润增速筛选
     if config.get('ENABLE_PROFIT_GROWTH_FILTER'):
-        min_profit_growth = config.get('MIN_PROFIT_GROWTH_3Y') / 100  # 转换为小数
+        min_profit_growth = float(config.get('MIN_PROFIT_GROWTH_3Y', 0)) / 100  # 转换为小数
         
         def check_profit_growth(idx):
             """检查近3年净利润增速"""
@@ -265,7 +265,7 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     # 2. 现金流质量筛选
     if config.get('ENABLE_CASHFLOW_QUALITY_FILTER'):
-        min_cashflow_ratio = config.get('MIN_CASHFLOW_PROFIT_RATIO')
+        min_cashflow_ratio = float(config.get('MIN_CASHFLOW_PROFIT_RATIO', 0))
         
         def check_cashflow_quality(idx):
             """检查现金流质量"""
@@ -278,7 +278,7 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     
     # 3. 股权结构稳定性筛选
     if config.get('ENABLE_SHAREHOLDER_STABILITY_FILTER'):
-        min_shareholder_ratio = config.get('MIN_TOP1_SHAREHOLDER_RATIO')
+        min_shareholder_ratio = float(config.get('MIN_TOP1_SHAREHOLDER_RATIO', 0))
         
         def check_shareholder_stability(idx):
             """检查股权结构稳定性"""
@@ -507,12 +507,19 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'strike_zone_score': df['strike_zone_score'] if 'strike_zone_score' in df.columns else None,
         'strike_zone_rating': df['strike_zone_rating'] if 'strike_zone_rating' in df.columns else None,
         'strike_zone': df['strike_zone'] if 'strike_zone' in df.columns else None,
-        # v7.2.1新增
+        # v7.2.1新增，v7.3升级
         'ma250': df['ma250'].round(2) if 'ma250' in df.columns else None,
+        'ma20': df['ma20'].round(2) if 'ma20' in df.columns else None,  # v7.3新增
+        'ma60': df['ma60'].round(2) if 'ma60' in df.columns else None,  # v7.3新增
+        'current_price': df['current_price'].round(2) if 'current_price' in df.columns else None,  # v7.3新增
         'price_vs_ma_pct': df['price_vs_ma_pct'].round(2) if 'price_vs_ma_pct' in df.columns else None,
         'ma_slope': df['ma_slope'].round(4) if 'ma_slope' in df.columns else None,
+        'trend': df['trend'] if 'trend' in df.columns else None,  # v7.3新增
+        'trend_strength': df['trend_strength'] if 'trend_strength' in df.columns else None,  # v7.3新增
         'signal': df['signal'] if 'signal' in df.columns else None,
         'signal_level': df['signal_level'].astype(int) if 'signal_level' in df.columns else None,
+        'signal_type': df['signal_type'] if 'signal_type' in df.columns else None,  # v7.3新增
+        'action': df['action'] if 'action' in df.columns else None,  # v7.3新增
         'ma_score': df['ma_score'] if 'ma_score' in df.columns else None,
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
