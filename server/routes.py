@@ -251,7 +251,7 @@ def run():
                 merged.loc[merged['code'] == code, 'signal_type'] = ma_data[code]['signal_type']  # v7.3新增
                 merged.loc[merged['code'] == code, 'action'] = ma_data[code]['action']  # v7.3新增
         
-        print(f"  ✓ 成功获取质量因子数据")
+        print("  ✓ 成功获取质量因子数据")
 
         # 2. 硬性筛选
         filtered = filter_stocks(merged)
