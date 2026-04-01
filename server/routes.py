@@ -180,8 +180,16 @@ def run():
 
         # v8.4.1新增：利润增长筛选（过滤负增长股票）
         config = ConfigService.get_instance()  # v8.4.1修复：添加config实例定义
-        min_growth = config.get_float('MIN_PROFIT_GROWTH', default=0)
-        enable_filter = config.get_bool('ENABLE_PROFIT_GROWTH_FILTER')
+        # ConfigService的get方法不支持default参数，需要先获取再转换
+        try:
+            min_growth = float(config.get('MIN_PROFIT_GROWTH'))
+        except (KeyError, ValueError):
+            min_growth = 0.0  # 默认值
+        
+        try:
+            enable_filter = config.get('ENABLE_PROFIT_GROWTH_FILTER') == 'True'
+        except KeyError:
+            enable_filter = False  # 默认值
         if enable_filter:
             before_count = len(merged)
             # 无数据放行，负增长过滤
