@@ -104,7 +104,11 @@ def init_db():
         ('signal_level', 'INTEGER'),
         ('signal_type', 'TEXT'),  # v7.3新增：信号类型 buy/sell/hold
         ('action', 'TEXT'),  # v7.3新增：操作建议
-        ('ma_score', 'REAL')
+        ('ma_score', 'REAL'),
+        # v8.4新增：成长因子
+        ('growth_factor', 'REAL'),
+        ('peg', 'REAL'),
+        ('roe_trend', 'REAL'),
     ]:
         try:
             conn.execute(f'ALTER TABLE stock_data ADD COLUMN {col} {col_type}')
@@ -146,21 +150,45 @@ def run():
             return jsonify({'success': False, 'error': '未获取到任何数据，请检查网络'})
 
         # v7.2新增：获取质量因子增强数据
-        print("步骤11: 获取质量因子增强数据...")
+        print("步骤9: 获取分红年数数据（v8.2修复）...")
+        # v8.4.1修复：profit_growth_3y已通过fetch_profit_growth_data获取，不需要重复查询
         from server.services.fetcher import (
-            get_profit_history_batch,
+            # get_profit_history_batch,  # v8.4.1删除：profit_growth_3y已通过fetch_profit_growth_data获取
             get_operating_cashflow_batch,
             get_top_shareholder_ratio_batch,
-            calculate_profit_growth_3y,
+            # calculate_profit_growth_3y,  # v8.4.1删除：已通过fetch_profit_growth_data获取
             calculate_cashflow_profit_ratio,
             calc_ma_position_batch,  # v7.2.1新增
-            is_profit_growing_strict  # v7.2.1新增
+            # is_profit_growing_strict,  # v8.4.1删除：不再使用
+            get_dividend_years_batch,  # v8.2修复
+            fetch_profit_growth_data,  # v8.4新增
         )
         
         candidate_codes = merged['code'].tolist()
         
-        # 1.1 获取净利润历史数据
-        profit_history = get_profit_history_batch(candidate_codes, years=4)
+        # v8.2修复：获取真实分红年数
+        dividend_years_map = get_dividend_years_batch(candidate_codes, years=4)
+        merged['dividend_years'] = merged['code'].map(lambda x: dividend_years_map.get(x, 0))
+        
+        # v8.4新增：获取成长因子数据（净利润增长率、ROE趋势）
+        print("步骤9.1: 获取成长因子数据（v8.4）...")
+        growth_data = fetch_profit_growth_data(candidate_codes, years=3)
+        merged['profit_growth_3y'] = merged['code'].map(lambda x: growth_data.get(x, {}).get('profit_growth_3y'))
+        merged['roe_trend'] = merged['code'].map(lambda x: growth_data.get(x, {}).get('roe_trend'))
+        merged['peg'] = None  # PEG在scorer中计算
+        merged['growth_factor'] = None  # growth_factor在scorer中计算
+
+        # v8.4.1新增：利润增长筛选（过滤负增长股票）
+        min_growth = config.get_float('MIN_PROFIT_GROWTH', default=0)
+        enable_filter = config.get_bool('ENABLE_PROFIT_GROWTH_FILTER')
+        if enable_filter:
+            before_count = len(merged)
+            # 无数据放行，负增长过滤
+            mask = merged['profit_growth_3y'].isna() | (merged['profit_growth_3y'] >= min_growth)
+            merged = merged[mask].copy()
+            filtered_count = before_count - len(merged)
+            if filtered_count > 0:
+                print(f"  ✓ 利润增长筛选过滤{filtered_count}只（负增长）")
         
         # 1.2 获取经营现金流数据
         operating_cashflow = get_operating_cashflow_batch(candidate_codes)
@@ -172,8 +200,9 @@ def run():
         print("步骤12: 计算均线位置和买点信号...")
         ma_data = calc_ma_position_batch(candidate_codes)
         
-        # 1.5 计算并合并数据
-        merged['profit_growth_3y'] = None
+        # v8.4.1修复：保留fetch_profit_growth_data获取的成长因子数据
+        # 删除merged['profit_growth_3y'] = None，避免覆盖v8.4新增的数据
+        # 注意：profit_growth_3y和roe_trend已在第174-176行获取，这里不能覆盖
         merged['cashflow_profit_ratio'] = None
         merged['top1_shareholder_ratio'] = None
         merged['ma250'] = None  # v7.2.1新增
@@ -190,11 +219,8 @@ def run():
         merged['action'] = None  # v7.3新增
         
         for code in candidate_codes:
-            # 计算净利润增速
-            if code in profit_history:
-                growth = calculate_profit_growth_3y(profit_history[code])
-                if growth is not None:
-                    merged.loc[merged['code'] == code, 'profit_growth_3y'] = growth
+            # v8.4.1修复：profit_growth_3y已在第174-176行通过fetch_profit_growth_data获取
+            # 不需要在此处重复计算，避免数据不一致
             
             # 计算现金流质量
             if code in operating_cashflow:
