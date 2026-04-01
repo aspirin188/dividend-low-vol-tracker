@@ -179,6 +179,7 @@ def run():
         merged['growth_factor'] = None  # growth_factor在scorer中计算
 
         # v8.4.1新增：利润增长筛选（过滤负增长股票）
+        config = ConfigService.get_instance()  # v8.4.1修复：添加config实例定义
         min_growth = config.get_float('MIN_PROFIT_GROWTH', default=0)
         enable_filter = config.get_bool('ENABLE_PROFIT_GROWTH_FILTER')
         if enable_filter:
