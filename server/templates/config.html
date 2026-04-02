@@ -461,16 +461,56 @@
         async function applyStrategy(strategyId) {
             try {
                 showToast('正在应用策略...', 'info');
+                
+                // 1. 应用策略配置
                 const res = await fetch('/api/config/strategies', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({strategy_id: strategyId})
                 });
                 const data = await res.json();
-                
+
                 if (data.success) {
-                    showToast(data.message, 'success');
+                    showToast('策略已应用，正在快速重筛...', 'success');
                     loadConfigs();  // 重新加载配置
+                    
+                    // 2. 检查数据状态
+                    const statusRes = await fetch('/api/status');
+                    const statusData = await statusRes.json();
+                    
+                    if (statusData.success && statusData.raw_data.is_today) {
+                        // 有今天的静态数据，快速重筛
+                        showToast('正在快速重筛（<5秒）...', 'info');
+                        
+                        const rescreenRes = await fetch('/api/rescreen', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'}
+                        });
+                        const rescreenData = await rescreenRes.json();
+                        
+                        if (rescreenData.success) {
+                            showToast(`筛选完成！找到${rescreenData.count}只股票（耗时${rescreenData.screen_time}秒）`, 'success');
+                            
+                            // 延迟跳转，让用户看到提示
+                            setTimeout(() => {
+                                window.location.href = '/';
+                            }, 1500);
+                        } else {
+                            showToast('快速重筛失败: ' + rescreenData.error, 'error');
+                            if (rescreenData.need_fetch) {
+                                // 需要获取数据
+                                if (confirm('静态数据已过期，是否重新获取数据？（需要3-5分钟）')) {
+                                    window.location.href = '/?auto_run=true';
+                                }
+                            }
+                        }
+                    } else {
+                        // 没有今天的静态数据，需要完整运行
+                        showToast('没有今天的静态数据，需要完整获取（3-5分钟）', 'info');
+                        setTimeout(() => {
+                            window.location.href = '/?auto_run=true';
+                        }, 1500);
+                    }
                 } else {
                     showToast('应用策略失败: ' + data.error, 'error');
                 }
@@ -481,7 +521,7 @@
 
         // 渲染配置项
         function renderConfigs() {
-            const categories = ['A筛选', 'B风控', 'C权重'];
+            const categories = ['A筛选', 'B风控', 'C权重', 'D质量'];
             
             categories.forEach(cat => {
                 const container = document.getElementById('configs-' + cat);
@@ -538,6 +578,14 @@
                 'WEIGHT_DIVIDEND': '股息率权重',
                 'WEIGHT_VOL': '波动率权重',
                 'WEIGHT_STABILITY': '分红稳定性权重',
+                'WEIGHT_GROWTH': '成长因子权重',
+                'ENABLE_PROFIT_GROWTH_FILTER': '利润增长筛选',
+                'MIN_PROFIT_GROWTH': '最低利润增速',
+                'PROFIT_GROWTH_MODE': '增长判断模式',
+                'ENABLE_CASHFLOW_QUALITY_FILTER': '现金流质量筛选',
+                'MIN_CASHFLOW_PROFIT_RATIO': '最低现金流比率',
+                'ENABLE_SHAREHOLDER_STABILITY_FILTER': '股权稳定性筛选',
+                'MIN_TOP1_SHAREHOLDER_RATIO': '最低大股东持股',
             };
             return names[key] || key;
         }
@@ -578,11 +626,12 @@
 
         // 更新权重和
         function updateWeightSum() {
-            const w1 = parseFloat(document.getElementById('WEIGHT_DIVIDEND').value) || 0;
-            const w2 = parseFloat(document.getElementById('WEIGHT_VOL').value) || 0;
-            const w3 = parseFloat(document.getElementById('WEIGHT_STABILITY').value) || 0;
+            const w1 = parseFloat(document.getElementById('WEIGHT_DIVIDEND')?.value) || 0;
+            const w2 = parseFloat(document.getElementById('WEIGHT_VOL')?.value) || 0;
+            const w3 = parseFloat(document.getElementById('WEIGHT_STABILITY')?.value) || 0;
+            const w4 = parseFloat(document.getElementById('WEIGHT_GROWTH')?.value) || 0;
             
-            const sum = w1 + w2 + w3;
+            const sum = w1 + w2 + w3 + w4;
             const sumValue = document.getElementById('weightSumValue');
             const sumStatus = document.getElementById('weightSumStatus');
             const sumDiv = document.getElementById('weightSum');
@@ -604,7 +653,7 @@
         async function saveConfigs() {
             // 收集所有配置
             const newConfigs = {};
-            const categories = ['A筛选', 'B风控', 'C权重'];
+            const categories = ['A筛选', 'B风控', 'C权重', 'D质量'];
             
             for (const cat of categories) {
                 if (!configs[cat]) continue;

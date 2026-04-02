@@ -56,3 +56,6 @@ test_data/
 
 # Workbuddy internal
 .workbuddy/
+.archive/
+instance/
+data/
