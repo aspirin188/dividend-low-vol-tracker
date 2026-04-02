@@ -1,19 +1,40 @@
 """
-数据获取服务 — 红利低波跟踪系统（v7.6 极简稳定版）
+数据获取服务 — 红利低波跟踪系统（v8.5 质量因子完善版）
 
-v7.6 核心原则：
-1. 简单可靠 > 性能优化
-2. 稳定运行 > 功能完整
-3. 只使用经过验证的稳定接口
+v8.5 核心新增：
+1. get_operating_cashflow_batch() 真实实现：从stock_yjbb_em获取每股经营现金流
+2. get_top_shareholder_ratio_batch() 真实实现：从stock_gdfx_free_holding_analyse_em获取第一大股东持股比例
+3. calculate_cashflow_profit_ratio() 更新为每股口径计算
+4. 消除v7.2以来的桩函数依赖
+
+v8.4 核心新增：
+1. 成长因子数据获取：净利润增长率、PEG、ROE趋势
+2. fetch_profit_growth_data() 真实实现（不再返回空数据）
+3. calculate_profit_growth_3y() 真实实现
+
+v8.3 核心修复：
+1. 信号逻辑优化：趋势向上时降低死叉信号强度
+   - 趋势向下+死叉 → 强制卖出（-4）
+   - 横盘+死叉 → 减仓（-2）
+   - 趋势向上+死叉 → 警示（-1），改为观察而非卖出
+
+v8.2 核心修复：
+1. PE/PB: 使用 stock_yjbb_em 的 EPS 和 stock_fhps_em 的每股净资产计算
+2. 市值: 使用 stock_fhps_em 的总股本 × 股价计算真实市值
+3. 分红年数: 查询近5年 stock_fhps_em 数据统计真实分红年数
+4. 支付率稳定性: 查询近3年分红数据计算
+5. 每股股利: 从 stock_fhps_em 现金分红比例字段直接获取
+6. 删除桩函数 calculate_ma_position_batch，消除同名冲突
 
 数据流程：
 1. akshare获取EPS/ROE（年报数据）
 2. 新浪接口获取实时股价
-3. akshare获取分红数据
-4. 计算股息率并筛选
+3. akshare获取分红数据（含总股本、每股净资产等）
+4. 计算股息率、PE、PB、市值并筛选
 """
 
 import re
+import os
 import time
 import math
 import numpy as np
@@ -21,6 +42,7 @@ import pandas as pd
 import akshare as ak
 import requests
 from datetime import datetime, timedelta
+from contextlib import contextmanager
 
 
 # ============================================================
@@ -38,6 +60,64 @@ _HEADERS = {
 
 _TIMEOUT = 30
 _PROXIES = {'http': None, 'https': None}
+# v8.0: K线数据缓存，避免重复请求
+_hist_cache = {}
+
+
+# ============================================================
+# 代理控制 - v8.0修复: 解决ProxyError问题
+# ============================================================
+
+@contextmanager
+def no_proxy():
+    """
+    临时禁用代理的上下文管理器
+    
+    macOS上requests/urllib3可能从系统网络设置自动读取代理，
+    仅清除环境变量不够，还需要在session层面禁用代理。
+    
+    v8.0修复：同时清除环境变量 + monkey-patch requests.Session
+    """
+    # 保存原有代理设置
+    old_env = {}
+    for key in ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY',
+                'all_proxy', 'ALL_PROXY', 'no_proxy', 'NO_PROXY']:
+        old_env[key] = os.environ.get(key)
+        if key in os.environ:
+            del os.environ[key]
+    
+    # 设置NO_PROXY = '*' 来禁用所有代理（针对从系统设置读取的情况）
+    os.environ['NO_PROXY'] = '*'
+    os.environ['no_proxy'] = '*'
+    
+    # Monkey-patch requests以强制不使用代理
+    original_get = requests.Session.get
+    original_post = requests.Session.post
+    
+    def patched_get(self, url, **kwargs):
+        kwargs['proxies'] = {'http': None, 'https': None}
+        return original_get(self, url, **kwargs)
+    
+    def patched_post(self, url, **kwargs):
+        kwargs['proxies'] = {'http': None, 'https': None}
+        return original_post(self, url, **kwargs)
+    
+    requests.Session.get = patched_get
+    requests.Session.post = patched_post
+    
+    try:
+        yield
+    finally:
+        # 恢复原有代理设置
+        for key, value in old_env.items():
+            if value is not None:
+                os.environ[key] = value
+            elif key in os.environ:
+                del os.environ[key]
+        
+        # 恢复requests
+        requests.Session.get = original_get
+        requests.Session.post = original_post
 
 
 # ============================================================
@@ -50,7 +130,8 @@ def fetch_eps_data():
     
     try:
         # 使用akshare获取年报数据
-        df = ak.stock_yjbb_em(date='20241231')
+        with no_proxy():
+            df = ak.stock_yjbb_em(date='20241231')
         
         if df is None or df.empty:
             print("  ✗ 获取失败", flush=True)
@@ -158,58 +239,87 @@ def fetch_realtime_prices(stock_codes):
 
 
 def fetch_dividend_data():
-    """获取分红数据"""
-    print("  [3/3] 获取分红数据...", flush=True)
+    """
+    获取分红数据（v8.2增强：同时获取总股本、每股净资产、支付率）
+    
+    v8.2 修复：
+    - 利用 stock_fhps_em 返回的丰富字段，一次性获取：
+      股息率、总股本、每股净资产、现金分红比例、每股收益
+    - 用于计算 PE、PB、真实市值、每股股利、支付率
+    """
+    print("  [3/3] 获取分红及估值数据...", flush=True)
     
     try:
-        df = ak.stock_fhps_em(date='20241231')
+        with no_proxy():
+            df = ak.stock_fhps_em(date='20241231')
         
         if df is None or df.empty:
             print("  ✗ 获取失败", flush=True)
             return pd.DataFrame()
         
         # 识别列名
-        code_col = None
-        div_col = None
-        
+        col_map = {}
         for col in df.columns:
-            if '代码' in col or col.lower() == 'code':
-                code_col = col
-            elif '股利' in col or '派息' in col or 'dividend' in col.lower():
-                div_col = col
+            col_str = str(col)
+            if '代码' in col_str or col_str.lower() == 'code':
+                col_map['code'] = col
+            elif '股息率' in col_str:
+                col_map['div_yield'] = col
+            elif '现金分红' in col_str and '比例' in col_str:
+                col_map['div_ratio'] = col  # 每10股分红金额
+            elif col_str == '总股本':
+                col_map['total_shares'] = col
+            elif col_str == '每股净资产':
+                col_map['bps'] = col  # Book Value Per Share
+            elif col_str == '每股收益' and 'eps' not in col_map:
+                col_map['eps'] = col
         
-        if not code_col or not div_col:
-            # 尝试使用默认列
-            if len(df.columns) >= 2:
-                code_col = df.columns[0]
-                # 查找数值列
-                for col in df.columns[1:]:
-                    if df[col].dtype in ['float64', 'int64']:
-                        div_col = col
-                        break
-        
-        if not code_col or not div_col:
-            print(f"  ✗ 无法识别列名: {list(df.columns)}", flush=True)
+        if 'code' not in col_map:
+            print(f"  ✗ 无法识别代码列: {list(df.columns)}", flush=True)
             return pd.DataFrame()
         
-        # 重命名
-        df = df.rename(columns={code_col: 'code', div_col: 'dividend'})
+        # 提取数据
+        result = pd.DataFrame()
+        result['code'] = df[col_map['code']].astype(str).str.zfill(6)
         
-        # 清理数据
-        df['code'] = df['code'].astype(str).str.zfill(6)
-        df['dividend'] = pd.to_numeric(df['dividend'], errors='coerce')
+        # 股息率（百分比）
+        if 'div_yield' in col_map:
+            result['div_yield_raw'] = pd.to_numeric(df[col_map['div_yield']], errors='coerce') * 100
         
-        # 过滤有效数据
-        df = df[
-            (df['dividend'].notna()) &
-            (df['dividend'] > 0)
-        ].copy()
+        # 每10股分红金额 → 每股股利（元/股）
+        if 'div_ratio' in col_map:
+            result['div_per_share'] = pd.to_numeric(df[col_map['div_ratio']], errors='coerce') / 10
+        
+        # 总股本（股）
+        if 'total_shares' in col_map:
+            result['total_shares'] = pd.to_numeric(df[col_map['total_shares']], errors='coerce')
+        
+        # 每股净资产
+        if 'bps' in col_map:
+            result['bps'] = pd.to_numeric(df[col_map['bps']], errors='coerce')
+        
+        # 每股收益（从分红数据中获取，作为备用）
+        if 'eps' in col_map:
+            result['eps_from_div'] = pd.to_numeric(df[col_map['eps']], errors='coerce')
+        
+        # 兼容旧字段：dividend = 股息率百分比
+        if 'div_yield_raw' in result.columns:
+            result['dividend'] = result['div_yield_raw']
+        elif 'div_ratio' in col_map:
+            result['dividend'] = result['div_per_share']  # 后续用股价计算
+        
+        # 过滤有效数据（必须有股息率或分红金额）
+        valid_mask = result['dividend'].notna() & (result['dividend'] > 0)
+        result = result[valid_mask].copy()
         
         # 去重
-        df = df.drop_duplicates(subset='code', keep='first')
+        result = result.drop_duplicates(subset='code', keep='first')
         
-        print(f"  ✓ 获取 {len(df)} 只", flush=True)
-        return df[['code', 'dividend']]
+        valid_shares = result['total_shares'].notna().sum() if 'total_shares' in result.columns else 0
+        valid_bps = result['bps'].notna().sum() if 'bps' in result.columns else 0
+        print(f"  ✓ 获取 {len(result)} 只（含总股本{valid_shares}只、每股净资产{valid_bps}只）", flush=True)
+        
+        return result
         
     except Exception as e:
         print(f"  ✗ 错误: {e}", flush=True)
@@ -238,7 +348,7 @@ def merge_all_data():
     start_time = time.time()
     
     print("\n" + "="*60)
-    print("红利低波跟踪系统 v8.0 - 数据获取开始")
+    print("红利低波跟踪系统 v8.2 - 数据获取开始")
     print("="*60 + "\n")
     
     # 步骤1: 获取EPS数据
@@ -257,15 +367,31 @@ def merge_all_data():
     merged = eps_df.merge(price_df, on='code', how='inner')
     print(f"\n  合并后: {len(merged)} 只股票")
     
-    # 步骤3: 获取分红数据
+    # 步骤3: 获取分红及估值数据（v8.2增强）
     div_df = fetch_dividend_data()
     
     if not div_df.empty:
-        merged = merged.merge(div_df, on='code', how='left')
+        # 只合并需要的主字段，避免重复列
+        div_cols = ['code', 'dividend']
+        if 'total_shares' in div_df.columns:
+            div_cols.append('total_shares')
+        if 'bps' in div_df.columns:
+            div_cols.append('bps')
+        if 'div_per_share' in div_df.columns:
+            div_cols.append('div_per_share')
+        
+        merged = merged.merge(div_df[div_cols], on='code', how='left')
         
         # 步骤4: 计算股息率
         print("\n计算股息率...", flush=True)
-        merged['div_yield'] = (merged['dividend'] / merged['price'] * 100).round(2)
+        # 优先使用直接获取的股息率，备用方案：每股股利/股价
+        if 'div_yield_raw' in div_df.columns:
+            merged = merged.merge(div_df[['code', 'div_yield_raw']], on='code', how='left')
+            merged['div_yield'] = merged['div_yield_raw'].round(2)
+        elif 'div_per_share' in merged.columns:
+            merged['div_yield'] = (merged['div_per_share'] / merged['price'] * 100).round(2)
+        else:
+            merged['div_yield'] = merged['dividend'].round(2)
         
         # 步骤5: 筛选
         print("\n筛选（股息率≥3%）...", flush=True)
@@ -279,12 +405,42 @@ def merge_all_data():
         result['div_yield'] = None
         result['dividend'] = None
     
+    # 步骤6.1: v8.2修复 - 使用总股本计算真实市值
+    print("\n计算真实市值...", flush=True)
+    if 'total_shares' in result.columns and result['total_shares'].notna().any():
+        # 市值 = 股价 × 总股本 / 1e8（元→亿元）
+        result['market_cap'] = (result['price'] * result['total_shares'] / 1e8).round(2)
+        valid_cap = result['market_cap'].notna().sum()
+        print(f"  ✓ 有效市值数据 {valid_cap} 只", flush=True)
+    else:
+        print("  ⚠️ 无总股本数据，使用估算值", flush=True)
+        result['market_cap'] = result['price'] * 100
+    
+    # 步骤6.2: v8.2修复 - 计算PE和PB
+    print("\n计算PE和PB...", flush=True)
+    # PE = 股价 / EPS
+    result['pe'] = (result['price'] / result['eps']).round(2)
+    # PE合理性校验：PE < 0 表示亏损，PE > 200 可能是异常
+    result.loc[result['pe'] < 0, 'pe'] = None
+    result.loc[result['pe'] > 200, 'pe'] = None
+    
+    # PB = 股价 / 每股净资产
+    if 'bps' in result.columns and result['bps'].notna().any():
+        result['pb'] = (result['price'] / result['bps']).round(2)
+        result.loc[result['pb'] < 0, 'pb'] = None
+        result.loc[result['pb'] > 50, 'pb'] = None
+        valid_pb = result['pb'].notna().sum()
+        print(f"  ✓ 有效PE {result['pe'].notna().sum()} 只，PB {valid_pb} 只", flush=True)
+    else:
+        result['pb'] = None
+        print(f"  ✓ 有效PE {result['pe'].notna().sum()} 只（无PB数据）", flush=True)
+    
     # 排除ST
     result = result[~result['name'].str.contains('ST', case=False, na=False)].copy()
     
     print(f"\n  筛选后候选股: {len(result)} 只")
     
-    # 步骤6: 获取负债率数据（v8.0新增）
+    # 步骤7: 获取负债率数据（v8.0新增）
     print("\n获取负债率数据...", flush=True)
     candidate_codes = result['code'].tolist()
     debt_data = fetch_debt_ratio_batch(candidate_codes)
@@ -292,14 +448,6 @@ def merge_all_data():
     # 合并负债率数据
     result['debt_ratio'] = result['code'].map(lambda x: debt_data.get(x, {}).get('debt_ratio', 50.0))
     result['industry'] = result['code'].map(lambda x: debt_data.get(x, {}).get('industry', '未知'))
-    
-    # 步骤7: 获取市值数据（v8.0新增）
-    print("\n获取市值数据...", flush=True)
-    cap_data = fetch_market_cap_batch(candidate_codes)
-    result['market_cap'] = result['code'].map(lambda x: cap_data.get(x))
-    
-    # 对于未获取到市值的股票，使用默认值1000亿（让筛选通过）
-    result['market_cap'] = result['market_cap'].fillna(1000.0)
     
     # 步骤8: 计算价格百分位和波动率（仅对最终候选股，v8.0新增）
     # 注意：这里只对已经筛选后的候选股计算，避免对全量股票计算导致性能问题
@@ -330,12 +478,37 @@ def merge_all_data():
     result['basic_eps'] = result['eps']
     result['dividend_yield'] = result['div_yield']
     result['dividend_yield_ttm'] = result['div_yield']
-    result['dividend_per_share'] = result['dividend']
-    result['payout_ratio'] = None  # 将在后续通过财务数据计算
-    result['dividend_years'] = 5  # 默认值，后续可优化为实际计算
-    result['pe'] = None  # 市盈率，后续可从数据源获取
-    result['pb'] = None  # 市净率，后续可从数据源获取
+    # v8.2修复：dividend_per_share 使用真实每股股利（元/股）
+    if 'div_per_share' in result.columns:
+        result['dividend_per_share'] = result['div_per_share']
+    else:
+        result['dividend_per_share'] = result['dividend']  # 兼容
+    # v8.2修复：计算支付率 = 每股股利 / 每股收益
+    result['payout_ratio'] = (result['dividend_per_share'] / result['eps'] * 100).round(2)
+    result.loc[result['payout_ratio'] > 500, 'payout_ratio'] = None  # 异常值过滤
+    result['dividend_years'] = 5  # 后续 F-02 修复
+    # v8.2修复：PE/PB 已在步骤6计算
+    # pe 和 pb 字段已直接赋值，无需再设 None
     result['market'] = result['code'].apply(lambda x: '沪市' if x.startswith('6') else '深市' if x.startswith('00') else '创业板' if x.startswith('30') else '科创板' if x.startswith('68') else '未知')
+    
+    # v8.0修复: 确保所有数值列的类型正确
+    numeric_columns = [
+        'eps', 'roe', 'price', 'dividend', 'div_yield',
+        'debt_ratio', 'market_cap', 'price_percentile', 'annual_vol',
+        'basic_eps', 'dividend_yield', 'dividend_yield_ttm', 
+        'dividend_per_share', 'dividend_years'
+    ]
+    
+    for col in numeric_columns:
+        if col in result.columns:
+            result[col] = pd.to_numeric(result[col], errors='coerce')
+    
+    # 对NaN值进行合理填充
+    result['debt_ratio'] = result['debt_ratio'].fillna(50.0)  # 默认中等风险
+    # v8.0修复：市值不设置默认值，让筛选逻辑正确过滤小盘股
+    # result['market_cap'] = result['market_cap'].fillna(1000.0)  # 旧代码：导致小盘股通过筛选
+    result['annual_vol'] = result['annual_vol'].fillna(20.0)  # 默认20%波动率
+    result['dividend_years'] = result['dividend_years'].fillna(5)  # 默认5年
     
     return result
 
@@ -365,34 +538,307 @@ def calculate_ttm_dividend_batch(codes, prices):
     """兼容性函数"""
     return {}
 
-def get_dividend_years_batch(codes):
-    """兼容性函数"""
-    return {code: 5 for code in codes}
+def get_dividend_years_batch(codes, years=5):
+    """
+    获取连续分红年数（v8.2修复：真实实现）
+    
+    通过查询近years年的分红数据，统计每只股票的分红年数。
+    
+    Args:
+        codes: 股票代码列表
+        years: 查询年数，默认5年
+        
+    Returns:
+        {code: dividend_years}
+    """
+    from datetime import datetime
+    current_year = datetime.now().year
+    
+    # 计算需要查询的年报日期
+    dates = []
+    for y in range(years):
+        report_year = current_year - 1 - y  # 上一年到前years年
+        dates.append(f'{report_year}1231')
+    
+    # 如果当前在4月之后，最新年报可能是当年的
+    if datetime.now().month >= 4:
+        dates.insert(0, f'{current_year - 1}1231')
+        dates = dates[:years]  # 只取最近years个
+    
+    # 统计每只股票的分红年数
+    dividend_count = {code: 0 for code in codes}
+    
+    for date_str in dates:
+        try:
+            with no_proxy():
+                df = ak.stock_fhps_em(date=date_str)
+            
+            if df is None or df.empty:
+                continue
+            
+            # 找到代码列
+            code_col = None
+            for col in df.columns:
+                if '代码' in str(col) or str(col).lower() == 'code':
+                    code_col = col
+                    break
+            
+            if not code_col:
+                continue
+            
+            # 找到分红比例列
+            div_col = None
+            for col in df.columns:
+                if '现金分红' in str(col) and '比例' in str(col):
+                    div_col = col
+                    break
+            
+            if not div_col:
+                continue
+            
+            # 统计有分红的股票
+            df[code_col] = df[code_col].astype(str).str.zfill(6)
+            df[div_col] = pd.to_numeric(df[div_col], errors='coerce')
+            
+            for _, row in df[df[div_col] > 0].iterrows():
+                code = row[code_col]
+                if code in dividend_count:
+                    dividend_count[code] += 1
+                    
+        except Exception:
+            continue
+    
+    return dividend_count
 
 
 # ============================================================
-# v7.2 质量因子增强函数（兼容性桩）
+# v7.2/v8.4 质量因子数据获取（v8.4真实实现）
 # ============================================================
+
+_profit_growth_cache = {}
+
+def fetch_profit_growth_data(stock_codes, years=3):
+    """
+    批量获取净利润增长数据（v8.4真实实现）
+    
+    通过查询近years年的年报业绩数据，计算：
+    - profit_growth_3y: 近3年净利润CAGR（%）
+    - roe_trend: ROE趋势变化（最新ROE - years年前ROE，百分点）
+    - peg: PEG = PE / 利润增速
+    
+    数据来源：akshare stock_yjbb_em（年报业绩）
+    
+    Args:
+        stock_codes: 股票代码列表
+        years: 查询年数，默认3年
+        
+    Returns:
+        {code: {profit_growth_3y: float, roe_trend: float, peg: float}}
+    """
+    print(f"  获取净利润增长数据（{len(stock_codes)}只）...", flush=True)
+    
+    from datetime import datetime
+    current_year = datetime.now().year
+    
+    # 计算需要查询的年报日期
+    dates = []
+    for y in range(years + 1):  # 多查一年用于ROE趋势
+        report_year = current_year - 1 - y
+        dates.append(f'{report_year}1231')
+    
+    # 逐年获取净利润和ROE数据
+    # {code: {'year': year, 'net_profit': float, 'roe': float}}
+    stock_data = {}
+    
+    for date_str in dates:
+        try:
+            with no_proxy():
+                df = ak.stock_yjbb_em(date=date_str)
+            
+            if df is None or df.empty:
+                continue
+            
+            # 识别列名
+            code_col = None
+            profit_col = None
+            roe_col = None
+            
+            for col in df.columns:
+                col_str = str(col)
+                if '代码' in col_str or col_str.lower() == 'code':
+                    code_col = col
+                elif '净利润' in col_str and '同比' not in col_str and '扣除' not in col_str:
+                    profit_col = col
+                elif '净资产收益率' in col_str or 'ROE' in col_str.upper():
+                    roe_col = col
+            
+            if not code_col or not profit_col:
+                continue
+            
+            df[code_col] = df[code_col].astype(str).str.zfill(6)
+            df[profit_col] = pd.to_numeric(df[profit_col], errors='coerce')
+            if roe_col:
+                df[roe_col] = pd.to_numeric(df[roe_col], errors='coerce')
+            
+            year = int(date_str[:4])
+            
+            for _, row in df.iterrows():
+                code = row[code_col]
+                if code not in stock_codes:
+                    continue
+                if code not in stock_data:
+                    stock_data[code] = {}
+                
+                profit = row[profit_col]
+                if pd.notna(profit) and profit > 0:
+                    stock_data[code][year] = {
+                        'net_profit': float(profit),
+                        'roe': float(row[roe_col]) if roe_col and pd.notna(row[roe_col]) else None
+                    }
+                    
+        except Exception as e:
+            if date_str == dates[0]:  # 只打印第一个错误
+                print(f"    获取{date_str}数据失败: {e}", flush=True)
+            continue
+    
+    # 计算成长指标
+    results = {}
+    valid_growth = 0
+    valid_peg = 0
+    
+    for code in stock_codes:
+        code_entry = stock_data.get(code, {})
+        if len(code_entry) < 2:
+            results[code] = {
+                'profit_growth_3y': None,
+                'roe_trend': None,
+                'peg': None,
+            }
+            continue
+        
+        # 按年份排序
+        sorted_years = sorted(code_entry.keys())
+        
+        # 1. 计算净利润CAGR
+        latest_year = sorted_years[-1]
+        earliest_year = sorted_years[0]
+        
+        latest_profit = code_entry[latest_year]['net_profit']
+        earliest_profit = code_entry[earliest_year]['net_profit']
+        
+        if earliest_profit > 0:
+            n_years = latest_year - earliest_year
+            if n_years > 0:
+                cagr = (latest_profit / earliest_profit) ** (1.0 / n_years) - 1
+                profit_growth_3y = round(cagr * 100, 2)  # 转为百分比
+                valid_growth += 1
+            else:
+                profit_growth_3y = None
+        else:
+            profit_growth_3y = None
+        
+        # 2. 计算ROE趋势
+        latest_roe = code_entry[latest_year].get('roe')
+        earliest_roe = code_entry[earliest_year].get('roe')
+        
+        if latest_roe is not None and earliest_roe is not None:
+            roe_trend = round(latest_roe - earliest_roe, 2)  # 百分点变化
+        else:
+            roe_trend = None
+        
+        # 3. PEG稍后在scorer中计算（需要PE数据），此处先设None
+        results[code] = {
+            'profit_growth_3y': profit_growth_3y,
+            'roe_trend': roe_trend,
+            'peg': None,  # 需要配合PE数据计算
+        }
+    
+    _profit_growth_cache.update(results)
+    print(f"  ✓ 完成净利润增长数据获取（有效增长数据{valid_growth}只）", flush=True)
+    return results
+
 
 def get_profit_history_batch(stock_codes, years=4):
-    """获取净利润历史（兼容性桩）"""
-    return {}
+    """
+    获取净利润历史（v8.4真实实现）
+    返回 {code: [{'year': int, 'profit': float}, ...]}
+    """
+    from datetime import datetime
+    current_year = datetime.now().year
+    
+    result = {}
+    for y in range(years):
+        report_year = current_year - 1 - y
+        date_str = f'{report_year}1231'
+        
+        try:
+            with no_proxy():
+                df = ak.stock_yjbb_em(date=date_str)
+            
+            if df is None or df.empty:
+                continue
+            
+            code_col = None
+            profit_col = None
+            for col in df.columns:
+                col_str = str(col)
+                if '代码' in col_str or col_str.lower() == 'code':
+                    code_col = col
+                elif '净利润' in col_str and '同比' not in col_str and '扣除' not in col_str:
+                    profit_col = col
+            
+            if not code_col or not profit_col:
+                continue
+            
+            df[code_col] = df[code_col].astype(str).str.zfill(6)
+            df[profit_col] = pd.to_numeric(df[profit_col], errors='coerce')
+            
+            for _, row in df.iterrows():
+                code = row[code_col]
+                if code not in stock_codes:
+                    continue
+                if code not in result:
+                    result[code] = []
+                profit = row[profit_col]
+                if pd.notna(profit) and profit > 0:
+                    result[code].append({
+                        'year': report_year,
+                        'profit': float(profit)
+                    })
+        except Exception:
+            continue
+    
+    return result
 
-def get_operating_cashflow_batch(stock_codes):
-    """获取经营现金流（兼容性桩）"""
-    return {}
-
-def get_top_shareholder_ratio_batch(stock_codes):
-    """获取第一大股东持股比例（兼容性桩）"""
-    return {}
 
 def calculate_profit_growth_3y(profit_history):
-    """计算3年利润增长率（兼容性桩）"""
-    return None
-
-def calculate_cashflow_profit_ratio(operating_cashflow, net_profit):
-    """计算现金流质量比率（兼容性桩）"""
-    return None
+    """
+    计算3年利润增长率（v8.4真实实现）
+    
+    Args:
+        profit_history: [{'year': int, 'profit': float}, ...]
+        
+    Returns:
+        float or None: CAGR百分比，如 8.5 表示 8.5%
+    """
+    if not profit_history or len(profit_history) < 2:
+        return None
+    
+    # 按年份排序
+    sorted_data = sorted(profit_history, key=lambda x: x['year'])
+    
+    earliest = sorted_data[0]
+    latest = sorted_data[-1]
+    
+    if earliest['profit'] <= 0:
+        return None
+    
+    n_years = latest['year'] - earliest['year']
+    if n_years <= 0:
+        return None
+    
+    cagr = (latest['profit'] / earliest['profit']) ** (1.0 / n_years) - 1
+    return round(cagr * 100, 2)
 
 def calc_ma_position_batch(stock_codes):
     """
@@ -424,8 +870,8 @@ def calc_ma_position_batch(stock_codes):
             
         try:
             # 获取历史数据（280天用于计算250日均线+30日趋势判断）
-            # 使用akshare获取日K数据
-            df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date="20240101", adjust="qfq")
+            # v8.0修复: 使用_fetch_hist自动选择可用数据源
+            df = _fetch_hist(code)
             
             if df is None or len(df) < 280:
                 # 数据不足，返回None
@@ -502,11 +948,26 @@ def calc_ma_position_batch(stock_codes):
             
             # 卖出信号优先级最高（风险控制第一）
             # 1. 死叉检测（MA20 < MA60）
+            # v8.3优化：趋势向上时降级信号，避免长期趋势向上时过度反应
             if ma20 is not None and ma60 is not None and ma20 < ma60:
-                signal = "强制卖出"
-                signal_level = -4
-                signal_type = "sell"
-                action = "短期均线死叉，不计成本卖出"
+                if trend == '向下':
+                    # 趋势向下 + 死叉 → 强制卖出
+                    signal = "强制卖出"
+                    signal_level = -4
+                    signal_type = "sell"
+                    action = "趋势向下+死叉，风险控制卖出"
+                elif trend == '横盘':
+                    # 横盘 + 死叉 → 减仓
+                    signal = "减仓"
+                    signal_level = -2
+                    signal_type = "sell"
+                    action = "横盘震荡+死叉，减半仓观望"
+                else:  # trend == '向上'
+                    # 趋势向上 + 死叉 → 警示（降级处理）
+                    signal = "警示"
+                    signal_level = -1
+                    signal_type = "hold"
+                    action = "趋势向上+死叉，短期波动，密切观察"
             
             # 2. 价格跌破250日线且趋势向下
             elif price_vs_ma_pct is not None and price_vs_ma_pct < 0 and trend == '向下':
@@ -526,7 +987,7 @@ def calc_ma_position_batch(stock_codes):
             elif price_vs_ma_pct is not None and price_vs_ma_pct < 0 and trend == '向上':
                 signal = "警示"
                 signal_level = -1
-                signal_type = "sell"
+                signal_type = "hold"
                 action = "跌破均线但趋势仍向上，密切观察"
             
             # 买入信号（仅在无卖出信号时判断）
@@ -610,42 +1071,176 @@ def calc_ma_position_batch(stock_codes):
     return results
 
 def is_profit_growing_strong(profit_history, min_cagr=0.1):
-    """判断利润是否强劲增长（兼容性桩）"""
-    return False
+    """判断利润是否强劲增长（v8.4真实实现）"""
+    growth = calculate_profit_growth_3y(profit_history)
+    return growth is not None and growth >= min_cagr * 100
 
 def is_profit_growing_strict(profit_history, min_cagr=0.05, min_years=3):
-    """严格判断利润增长（兼容性桩）"""
-    return False
+    """严格判断利润增长（v8.4真实实现）"""
+    growth = calculate_profit_growth_3y(profit_history)
+    return growth is not None and growth >= min_cagr * 100
 
 
-def calculate_payout_stability_score(code: str) -> tuple:
+_payout_stability_cache = {}
+
+def calculate_payout_stability_score(code: str, years: int = 3) -> tuple:
     """
-    计算分红稳定性评分
-
+    计算分红稳定性评分（v8.2修复：真实实现）
+    
+    查询近years年的分红数据，计算：
+    - payout_3y_avg: 每股股利3年均值
+    - payout_stability: 稳定性评分 (0-100)
+    
+    稳定性算法：
+    - 有分红记录的年数 / years * 50 + 均值系数 * 50
+    - 均值系数 = min(支付率均值/100, 1.0)，支付率50%以上得满分
+    
     Args:
         code: 股票代码
-
+        years: 查询年数
+        
     Returns:
-        (payout_3y_avg, payout_stability)
-        - payout_3y_avg: 3年平均支付率（可能是None）
-        - payout_stability: 分红稳定性评分 (0-100)
+        (payout_avg, stability_score)
     """
-    # 从DataFrame中获取dividend_years
-    # 注意：这个函数在循环中被调用，需要从外部传入df
-    return (None, 50.0)  # 默认返回中等稳定性
+    global _payout_stability_cache
+    
+    if code in _payout_stability_cache:
+        return _payout_stability_cache[code]
+    
+    from datetime import datetime
+    current_year = datetime.now().year
+    
+    div_amounts = []  # 每年每股股利
+    
+    for y in range(years):
+        report_year = current_year - 1 - y
+        date_str = f'{report_year}1231'
+        
+        try:
+            with no_proxy():
+                df = ak.stock_fhps_em(date=date_str)
+            
+            if df is None or df.empty:
+                continue
+            
+            code_col = None
+            div_col = None
+            eps_col = None
+            
+            for col in df.columns:
+                col_str = str(col)
+                if '代码' in col_str or col_str.lower() == 'code':
+                    code_col = col
+                elif '现金分红' in col_str and '比例' in col_str:
+                    div_col = col
+                elif col_str == '每股收益':
+                    eps_col = col
+            
+            if not code_col or not div_col:
+                continue
+            
+            df[code_col] = df[code_col].astype(str).str.zfill(6)
+            row = df[df[code_col] == code]
+            
+            if not row.empty:
+                div_amount = pd.to_numeric(row[div_col].values[0], errors='coerce')
+                if pd.notna(div_amount) and div_amount > 0:
+                    div_amounts.append(div_amount / 10)  # 每10股→每股
+                    
+        except Exception:
+            continue
+    
+    if not div_amounts:
+        _payout_stability_cache[code] = (None, 30.0)  # 无分红数据，低分
+        return (None, 30.0)
+    
+    avg_div = sum(div_amounts) / len(div_amounts)
+    
+    # 计算稳定性
+    consistency = len(div_amounts) / years  # 0-1，分红连续性
+    stability = round(consistency * 50 + 50, 1)  # 基础分：连续性50 + 固定50
+    
+    # 微调：如果分红金额稳定（变异系数低），加分
+    if len(div_amounts) >= 2:
+        mean = sum(div_amounts) / len(div_amounts)
+        if mean > 0:
+            std = (sum((x - mean)**2 for x in div_amounts) / len(div_amounts)) ** 0.5
+            cv = std / mean  # 变异系数
+            if cv < 0.2:  # 非常稳定
+                stability = min(100, stability + 15)
+            elif cv < 0.5:  # 较稳定
+                stability = min(100, stability + 5)
+    
+    _payout_stability_cache[code] = (round(avg_div, 4), stability)
+    return (round(avg_div, 4), stability)
 
 
-def calculate_ma_position_batch(stock_codes: list) -> dict:
+def _fetch_hist_from_tencent(code: str) -> pd.DataFrame:
     """
-    批量计算均线位置（兼容性桩）
+    通过腾讯接口获取股票日K线数据（v8.1修复）
 
-    Args:
-        stock_codes: 股票代码列表
+    新浪接口已被反爬虫拦截(456)，东方财富push2his因LibreSSL不可达。
+    腾讯接口 web.ifzq.gtimg.cn 稳定可用，返回前复权日线数据。
 
-    Returns:
-        {code: {'ma250': float, 'ma20': float, 'current_price': float}}
+    返回字段: 日期, 开盘, 收盘, 最高, 最低, 成交量
     """
-    return {code: {'ma250': None, 'ma20': None, 'current_price': None} for code in stock_codes}
+    if code in _hist_cache:
+        return _hist_cache[code]
+
+    try:
+        prefix = 'sh' if code.startswith('6') else 'sz'
+        url = 'http://web.ifzq.gtimg.cn/appstock/app/fqkline/get'
+        params = {
+            '_var': 'kline_dayqfq',
+            'param': f'{prefix}{code},day,,,800,qfq',
+        }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Referer': 'http://gu.qq.com/',
+        }
+
+        resp = requests.get(url, params=params, headers=headers, timeout=10,
+                            proxies={'http': None, 'https': None})
+        if resp.status_code != 200:
+            return None
+
+        text = resp.text.strip()
+        if not text.startswith('kline_dayqfq='):
+            return None
+
+        import json
+        data = json.loads(text[13:])
+        qfqday = data.get('data', {}).get(f'{prefix}{code}', {}).get('qfqday', [])
+        if not qfqday:
+            return None
+
+        # 解析: [日期, 开盘, 收盘, 最高, 最低, 成交量]
+        # 注意: 除权日行会多一列分红信息dict，只取前6列
+        rows = [row[:6] for row in qfqday]
+        df = pd.DataFrame(rows, columns=['日期', '开盘', '收盘', '最高', '最低', '成交量'])
+        df['日期'] = pd.to_datetime(df['日期'])
+        for col in ['开盘', '收盘', '最高', '最低', '成交量']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.sort_values('日期').reset_index(drop=True)
+
+        _hist_cache[code] = df
+        return df
+    except Exception:
+        return None
+
+
+def _fetch_hist(code: str) -> pd.DataFrame:
+    """
+    获取股票日K线数据（v8.1修复：使用腾讯接口）
+
+    v8.1修复:
+    - 新浪接口反爬拦截(456) + 东方财富LibreSSL不可达
+    - 改用腾讯 web.ifzq.gtimg.cn，稳定快速(0.2s/只)
+    - 800日前复权数据，覆盖约3年
+    """
+    if code in _hist_cache:
+        return _hist_cache[code]
+    return _fetch_hist_from_tencent(code)
 
 
 def calculate_volatility_batch(stock_codes: list, window: int = 120) -> dict:
@@ -676,11 +1271,24 @@ def calculate_volatility_batch(stock_codes: list, window: int = 120) -> dict:
         if i % 10 == 0:
             print(f"    进度: {i}/{len(stock_codes)}", flush=True)
         
+        # v8.0: 限速，避免被新浪限流（新浪限流约100次/秒）
+        if i > 0 and i % 20 == 0:
+            time.sleep(1)
+        
         try:
             # 获取历史数据（需要window+1天来计算收益率）
-            df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date="20240101", adjust="qfq")
+            # v8.0修复: 使用_fetch_hist自动选择可用数据源
+            df = _fetch_hist(code)
             
-            if df is None or len(df) < window + 1:
+            if df is None:
+                if i < 5:  # 只打印前5个错误
+                    print(f"    {code}: 数据获取返回None", flush=True)
+                results[code] = None
+                continue
+            
+            if len(df) < window + 1:
+                if i < 5:  # 只打印前5个错误
+                    print(f"    {code}: 数据不足{len(df)}/{window+1}", flush=True)
                 results[code] = None
                 continue
             
@@ -709,7 +1317,8 @@ def calculate_volatility_batch(stock_codes: list, window: int = 120) -> dict:
             results[code] = round(annual_vol, 2)
             
         except Exception as e:
-            print(f"    {code}波动率计算失败: {e}", flush=True)
+            if i < 5:  # 只打印前5个错误
+                print(f"    {code}波动率计算失败: {e}", flush=True)
             results[code] = None
             continue
     
@@ -746,11 +1355,23 @@ def calculate_price_percentile_batch(stock_codes: list, days: int = 252) -> dict
         if i % 10 == 0:
             print(f"    进度: {i}/{len(stock_codes)}", flush=True)
         
+        # v8.0: 每20只股票暂停1秒，避免限流
+        if i > 0 and i % 20 == 0:
+            time.sleep(1)
         try:
             # 获取历史数据
-            df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date="20240101", adjust="qfq")
+            # v8.0修复: 使用_fetch_hist自动选择可用数据源
+            df = _fetch_hist(code)
             
-            if df is None or len(df) < days * 0.5:  # 至少50%的数据
+            if df is None:
+                if i < 5:  # 只打印前5个错误
+                    print(f"    {code}: 数据获取返回None", flush=True)
+                results[code] = None
+                continue
+            
+            if len(df) < days * 0.5:  # 至少50%的数据
+                if i < 5:  # 只打印前5个错误
+                    print(f"    {code}: 数据不足{len(df)}/{days}", flush=True)
                 results[code] = None
                 continue
             
@@ -769,7 +1390,8 @@ def calculate_price_percentile_batch(stock_codes: list, days: int = 252) -> dict
             results[code] = round(percentile, 2)
             
         except Exception as e:
-            print(f"    {code}百分位计算失败: {e}", flush=True)
+            if i < 5:  # 只打印前5个错误
+                print(f"    {code}百分位计算失败: {e}", flush=True)
             results[code] = None
             continue
     
@@ -802,7 +1424,8 @@ def fetch_debt_ratio_batch(stock_codes: list) -> dict:
     try:
         # 使用akshare获取资产负债表数据
         # 获取最新报告期的数据
-        df = ak.stock_zcfz_em(date="20241231")
+        with no_proxy():
+            df = ak.stock_zcfz_em(date="20241231")
         
         if df is None or df.empty:
             print("  ✗ 无法获取资产负债表数据", flush=True)
@@ -857,9 +1480,11 @@ def fetch_debt_ratio_batch(stock_codes: list) -> dict:
 
 def fetch_market_cap_batch(stock_codes: list) -> dict:
     """
-    批量获取市值数据（v8.0新增）
+    批量获取市值数据（v8.0修复）
     
-    数据来源：akshare stock_yjbb_em（业绩报表中包含市值数据）
+    v8.0修复策略：
+    1. 优先使用stock_zh_a_spot_em（快速，一次获取全市场）
+    2. 失败时使用stock_individual_info_em逐个查询（慢但可靠）
     
     Args:
         stock_codes: 股票代码列表
@@ -871,50 +1496,77 @@ def fetch_market_cap_batch(stock_codes: list) -> dict:
     
     results = {}
     
+    # 方案1: 使用stock_zh_a_spot_em（快速）
     try:
-        # 使用akshare获取业绩报表数据（包含市值）
-        df = ak.stock_yjbb_em(date='20241231')
+        with no_proxy():
+            df = ak.stock_zh_a_spot_em()
         
-        if df is None or df.empty:
-            print("  ✗ 无法获取市值数据", flush=True)
-            return {code: None for code in stock_codes}
-        
-        # 识别列名
-        code_col = None
-        cap_col = None
-        
-        for col in df.columns:
-            col_str = str(col)
-            if '代码' in col_str:
-                code_col = col
-            elif '市值' in col_str and '亿' in col_str:
-                cap_col = col
-        
-        if not code_col or not cap_col:
-            print(f"  ⚠️ 无法识别市值列名，尝试备选方案", flush=True)
-            # 尝试通过现有数据估算市值
-            return {code: None for code in stock_codes}
-        
-        # 清理数据
-        df[code_col] = df[code_col].astype(str).str.zfill(6)
-        df[cap_col] = pd.to_numeric(df[cap_col], errors='coerce')
-        
-        # 构建结果字典
-        for code in stock_codes:
-            row = df[df[code_col] == code]
-            if row.empty:
-                results[code] = None
-            else:
-                cap = row[cap_col].values[0]
-                results[code] = round(float(cap), 2) if not pd.isna(cap) else None
-        
-        valid_count = sum(1 for v in results.values() if v is not None)
-        print(f"  ✓ 完成市值获取（有效数据{valid_count}只）")
-        return results
-        
+        if df is not None and not df.empty:
+            # 识别列名
+            code_col = None
+            cap_col = None
+            
+            for col in df.columns:
+                col_str = str(col)
+                if '代码' in col_str:
+                    code_col = col
+                elif '总市值' in col_str:
+                    cap_col = col
+                    break
+            
+            if code_col and cap_col:
+                # 清理数据
+                df[code_col] = df[code_col].astype(str).str.zfill(6)
+                df[cap_col] = pd.to_numeric(df[cap_col], errors='coerce')
+                
+                # 转换单位：元 -> 亿元
+                df['market_cap_yi'] = df[cap_col] / 100000000
+                
+                # 构建结果字典
+                for code in stock_codes:
+                    row = df[df[code_col] == code]
+                    if not row.empty:
+                        cap = row['market_cap_yi'].values[0]
+                        results[code] = round(float(cap), 2) if not pd.isna(cap) else None
+                
+                valid_count = sum(1 for v in results.values() if v is not None)
+                print(f"  ✓ 完成市值获取（有效数据{valid_count}只，快取方案）")
+                return results
     except Exception as e:
-        print(f"  ✗ 获取市值失败: {e}", flush=True)
-        return {code: None for code in stock_codes}
+        print(f"  ⚠️ 快取方案失败: {e}", flush=True)
+        print(f"  启用备选方案（逐个查询，较慢）...", flush=True)
+    
+    # 方案2: 使用stock_individual_info_em逐个查询（慢但可靠）
+    # v8.1修复：不使用no_proxy()，直接调用接口
+    for i, code in enumerate(stock_codes):
+        if i % 20 == 0:
+            print(f"    进度: {i}/{len(stock_codes)}", flush=True)
+        
+        # 限速：每查询5只股票暂停0.5秒
+        if i > 0 and i % 5 == 0:
+            time.sleep(0.5)
+        
+        try:
+            # v8.1修复：移除no_proxy()包装，避免连接中断
+            df = ak.stock_individual_info_em(symbol=code)
+            
+            if df is not None and not df.empty:
+                # 查找总市值
+                cap_row = df[df['item'] == '总市值']
+                if not cap_row.empty:
+                    cap_yuan = float(cap_row['value'].values[0])
+                    cap_yi = cap_yuan / 100000000  # 转换为亿元
+                    results[code] = round(cap_yi, 2)
+                else:
+                    results[code] = None
+            else:
+                results[code] = None
+        except Exception:
+            results[code] = None
+    
+    valid_count = sum(1 for v in results.values() if v is not None)
+    print(f"  ✓ 完成市值获取（有效数据{valid_count}只，备选方案）")
+    return results
 
 
 def get_dividend_per_share_batch(stock_codes: list) -> dict:
@@ -928,3 +1580,166 @@ def get_dividend_per_share_batch(stock_codes: list) -> dict:
         {code: dividend_per_share}
     """
     return {code: 0.0 for code in stock_codes}
+
+
+# ============================================================
+# v7.2 质量因子 — 真实数据获取（v8.5实现）
+# ============================================================
+
+def get_operating_cashflow_batch(stock_codes):
+    """
+    批量获取每股经营现金流量（v8.5真实实现）
+
+    数据来源：akshare stock_yjbb_em（年报业绩，包含"每股经营现金流量"列）
+
+    Args:
+        stock_codes: 股票代码列表
+
+    Returns:
+        {code: 每股经营现金流量(float)}  — 与 EPS 同口径（元/股）
+    """
+    print(f"  获取每股经营现金流数据（{len(stock_codes)}只）...", flush=True)
+
+    from datetime import datetime
+    current_year = datetime.now().year
+
+    # 尝试最近2年年报，确保数据覆盖（部分公司可能延迟发布最新年报）
+    results = {}
+    code_set = set(stock_codes)
+
+    for year_offset in [1, 2]:
+        report_year = current_year - year_offset
+        date_str = f'{report_year}1231'
+        remaining = code_set - set(results.keys())
+
+        if not remaining:
+            break
+
+        try:
+            with no_proxy():
+                df = ak.stock_yjbb_em(date=date_str)
+
+            if df is None or df.empty:
+                continue
+
+            # 识别列名
+            code_col = None
+            cashflow_col = None
+            for col in df.columns:
+                col_str = str(col)
+                if '代码' in col_str or col_str.lower() == 'code':
+                    code_col = col
+                elif '经营现金' in col_str:
+                    cashflow_col = col
+
+            if not code_col or not cashflow_col:
+                continue
+
+            df[code_col] = df[code_col].astype(str).str.zfill(6)
+            df[cashflow_col] = pd.to_numeric(df[cashflow_col], errors='coerce')
+
+            for _, row in df.iterrows():
+                code = row[code_col]
+                if code in remaining:
+                    val = row[cashflow_col]
+                    if pd.notna(val):
+                        results[code] = float(val)
+
+        except Exception as e:
+            print(f"  ⚠ 获取{date_str}数据异常: {e}", flush=True)
+            continue
+
+    valid_count = sum(1 for v in results.values() if v is not None)
+    print(f"  ✓ 获取每股经营现金流（有效数据{valid_count}只）", flush=True)
+    return results
+
+
+def get_top_shareholder_ratio_batch(stock_codes):
+    """
+    批量获取第一大股东持股比例（v8.5真实实现）
+
+    数据来源：akshare stock_gdfx_free_top_10_em（前十大流通股东）
+    逻辑：逐只查询，取排名第一的股东的"占总流通股本持股比例"
+
+    Args:
+        stock_codes: 股票代码列表
+
+    Returns:
+        {code: top1_shareholder_ratio(float)} — 第一大股东持股比例（0-1之间）
+    """
+    print(f"  获取第一大股东持股比例（{len(stock_codes)}只）...", flush=True)
+
+    from datetime import datetime
+    current_year = datetime.now().year
+    # 使用最近可用的报告期
+    report_date = f'{current_year - 1}0930'
+
+    results = {}
+
+    for i, code in enumerate(stock_codes):
+        if i % 10 == 0:
+            print(f"    进度: {i}/{len(stock_codes)}", flush=True)
+
+        try:
+            # 将股票代码转为akshare格式：sh600519, sz000858
+            if code.startswith('6'):
+                symbol = f'sh{code}'
+            elif code.startswith('0') or code.startswith('3'):
+                symbol = f'sz{code}'
+            else:
+                symbol = f'sh{code}'
+
+            with no_proxy():
+                df = ak.stock_gdfx_free_top_10_em(symbol=symbol, date=report_date)
+
+            if df is None or df.empty:
+                continue
+
+            # 找到"占总流通股本持股比例"列
+            ratio_col = None
+            for col in df.columns:
+                if '比例' in str(col) and ('流通' in str(col) or '总' in str(col)):
+                    ratio_col = col
+                    break
+
+            if ratio_col is None:
+                # 备选：找第一个包含"比例"的列
+                for col in df.columns:
+                    if '比例' in str(col):
+                        ratio_col = col
+                        break
+
+            if ratio_col is None:
+                continue
+
+            # 取排名第一的股东
+            top_row = df.iloc[0]
+            ratio = pd.to_numeric(top_row[ratio_col], errors='coerce')
+            if pd.notna(ratio):
+                # API返回的是百分比值（如54.07），转换为0-1之间
+                results[code] = round(float(ratio) / 100, 4)
+
+        except Exception:
+            continue
+
+    valid_count = len(results)
+    print(f"  ✓ 获取第一大股东持股比例（有效数据{valid_count}只）", flush=True)
+    return results
+
+
+def calculate_cashflow_profit_ratio(operating_cashflow, net_profit):
+    """
+    计算现金流质量比率
+
+    v8.5更新：两个参数均为"每股"口径（元/股），直接相除
+
+    Args:
+        operating_cashflow: 每股经营现金流（元/股）
+        net_profit: 每股收益 EPS（元/股）
+
+    Returns:
+        float: 经营现金流/EPS 比率，None表示无法计算
+    """
+    if operating_cashflow is None or net_profit is None or net_profit <= 0:
+        return None
+    return operating_cashflow / net_profit

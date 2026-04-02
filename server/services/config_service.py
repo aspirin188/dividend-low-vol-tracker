@@ -1,5 +1,5 @@
 """
-配置管理服务 — 红利低波跟踪系统 (v8.0)
+配置管理服务 — 红利低波跟踪系统 (v8.4)
 
 功能：
   - 参数化配置管理
@@ -23,76 +23,102 @@ from datetime import datetime
 
 # v8.0新增：预设策略模板
 PRESET_STRATEGIES = {
-    'conservative': {
-        'name': '保守型',
-        'description': '低波动、高分红、稳定优先',
-        'params': {
-            'MIN_DIVIDEND_YIELD': '4.0',    # 提高门槛
-            'MIN_MARKET_CAP': '800',        # 只选大盘
-            'MIN_ROE': '10.0',              # 高盈利
-            'MIN_DIVIDEND_YEARS': '5',      # 严格分红
-            'MAX_DEBT_RATIO': '60',         # 低负债
-            'WEIGHT_DIVIDEND': '0.6',       # 强调分红
-            'WEIGHT_VOL': '0.3',            # 重视波动
-            'WEIGHT_STABILITY': '0.1',
-        }
-    },
-    'balanced': {
-        'name': '均衡型',
-        'description': '兼顾收益与风险的平衡策略',
-        'params': {
-            'MIN_DIVIDEND_YIELD': '3.0',
-            'MIN_MARKET_CAP': '500',
-            'MIN_ROE': '8.0',
-            'MIN_DIVIDEND_YEARS': '3',
-            'MAX_DEBT_RATIO': '70',
-            'WEIGHT_DIVIDEND': '0.5',
-            'WEIGHT_VOL': '0.3',
-            'WEIGHT_STABILITY': '0.2',
-        }
-    },
-    'aggressive': {
-        'name': '激进型',
-        'description': '追求高收益，愿意承担较大波动',
-        'params': {
-            'MIN_DIVIDEND_YIELD': '2.0',    # 降低门槛
-            'MIN_MARKET_CAP': '300',        # 扩大范围
-            'MIN_ROE': '6.0',               # 放宽盈利
-            'MIN_DIVIDEND_YEARS': '2',
-            'MAX_DEBT_RATIO': '80',         # 放宽负债
-            'WEIGHT_DIVIDEND': '0.4',       # 降低分红权重
-            'WEIGHT_VOL': '0.4',            # 重视波动
-            'WEIGHT_STABILITY': '0.2',
-        }
-    },
-    'high_dividend': {
-        'name': '高股息',
-        'description': '专注于最高股息率股票',
-        'params': {
-            'MIN_DIVIDEND_YIELD': '4.5',    # 高股息门槛
-            'MIN_MARKET_CAP': '500',
-            'MIN_ROE': '5.0',               # 放宽ROE
-            'MIN_DIVIDEND_YEARS': '3',
-            'MAX_DEBT_RATIO': '75',
-            'WEIGHT_DIVIDEND': '0.7',       # 最高股息权重
-            'WEIGHT_VOL': '0.15',
-            'WEIGHT_STABILITY': '0.15',
-        }
-    },
-    'value': {
-        'name': '低估型',
-        'description': '偏好低估值、高性价比股票',
-        'params': {
-            'MIN_DIVIDEND_YIELD': '2.5',
-            'MIN_MARKET_CAP': '400',
-            'MIN_ROE': '10.0',              # 高ROE
-            'MIN_DIVIDEND_YEARS': '4',      # 稳定分红
-            'MAX_DEBT_RATIO': '65',
-            'WEIGHT_DIVIDEND': '0.35',
-            'WEIGHT_VOL': '0.35',           # 重视波动
-            'WEIGHT_STABILITY': '0.3',     # 重视稳定性
-        }
-    },
+        'conservative': {
+            'name': '保守型',
+            'description': '低波动、高分红、稳定优先',
+            'params': {
+                'MIN_DIVIDEND_YIELD': '4.0',
+                'MIN_MARKET_CAP': '800',
+                'MIN_ROE': '10.0',
+                'MIN_DIVIDEND_YEARS': '5',
+                'MAX_DEBT_RATIO': '60',
+                'WEIGHT_DIVIDEND': '0.5',
+                'WEIGHT_VOL': '0.3',
+                'WEIGHT_STABILITY': '0.15',
+                'WEIGHT_GROWTH': '0.05',
+                'MIN_PROFIT_GROWTH': '5',
+            }
+        },
+        'balanced': {
+            'name': '均衡型',
+            'description': '兼顾收益与风险的平衡策略',
+            'params': {
+                'MIN_DIVIDEND_YIELD': '3.0',
+                'MIN_MARKET_CAP': '500',
+                'MIN_ROE': '8.0',
+                'MIN_DIVIDEND_YEARS': '3',
+                'MAX_DEBT_RATIO': '70',
+                'WEIGHT_DIVIDEND': '0.35',
+                'WEIGHT_VOL': '0.25',
+                'WEIGHT_STABILITY': '0.15',
+                'WEIGHT_GROWTH': '0.25',
+                'MIN_PROFIT_GROWTH': '3',
+            }
+        },
+        'aggressive': {
+            'name': '激进型',
+            'description': '追求高收益，愿意承担较大波动',
+            'params': {
+                'MIN_DIVIDEND_YIELD': '2.0',
+                'MIN_MARKET_CAP': '300',
+                'MIN_ROE': '6.0',
+                'MIN_DIVIDEND_YEARS': '2',
+                'MAX_DEBT_RATIO': '80',
+                'WEIGHT_DIVIDEND': '0.25',
+                'WEIGHT_VOL': '0.25',
+                'WEIGHT_STABILITY': '0.20',
+                'WEIGHT_GROWTH': '0.30',
+                'MIN_PROFIT_GROWTH': '0',
+            }
+        },
+        'high_dividend': {
+            'name': '高股息',
+            'description': '专注于最高股息率股票',
+            'params': {
+                'MIN_DIVIDEND_YIELD': '4.5',
+                'MIN_MARKET_CAP': '500',
+                'MIN_ROE': '5.0',
+                'MIN_DIVIDEND_YEARS': '3',
+                'MAX_DEBT_RATIO': '75',
+                'WEIGHT_DIVIDEND': '0.60',
+                'WEIGHT_VOL': '0.20',
+                'WEIGHT_STABILITY': '0.15',
+                'WEIGHT_GROWTH': '0.05',
+                'MIN_PROFIT_GROWTH': '0',
+            }
+        },
+        'value': {
+            'name': '低估型',
+            'description': '偏好低估值、高性价比股票',
+            'params': {
+                'MIN_DIVIDEND_YIELD': '2.5',
+                'MIN_MARKET_CAP': '400',
+                'MIN_ROE': '10.0',
+                'MIN_DIVIDEND_YEARS': '4',
+                'MAX_DEBT_RATIO': '65',
+                'WEIGHT_DIVIDEND': '0.30',
+                'WEIGHT_VOL': '0.25',
+                'WEIGHT_STABILITY': '0.20',
+                'WEIGHT_GROWTH': '0.25',
+                'MIN_PROFIT_GROWTH': '3',
+            }
+        },
+        'growth_dividend': {
+            'name': '成长红利',
+            'description': '兼顾分红收益与成长性，捕捉"分红持续增长的优质公司"',
+            'params': {
+                'MIN_DIVIDEND_YIELD': '2.5',
+                'MIN_MARKET_CAP': '300',
+                'MIN_ROE': '10.0',
+                'MIN_DIVIDEND_YEARS': '3',
+                'MAX_DEBT_RATIO': '70',
+                'WEIGHT_DIVIDEND': '0.30',
+                'WEIGHT_VOL': '0.20',
+                'WEIGHT_STABILITY': '0.15',
+                'WEIGHT_GROWTH': '0.35',
+                'MIN_PROFIT_GROWTH': '5',
+            }
+        },
 }
 
 
@@ -185,11 +211,11 @@ class ConfigService:
         },
         {
             'config_key': 'MAX_DEBT_RATIO_FINANCE',
-            'config_value': '85',
+            'config_value': '95',
             'config_type': 'float',
             'category': 'B风控',
-            'description': '金融地产行业特殊处理。默认85%适应银行业高负债特点',
-            'default_value': '85',
+            'description': '金融地产行业特殊处理。默认95%适应银行业高杠杆特性（招商银行~95%）',
+            'default_value': '95',
             'min_value': '50',
             'max_value': '100',
             'unit': '%',
@@ -209,56 +235,68 @@ class ConfigService:
         # C类：评分权重参数
         {
             'config_key': 'WEIGHT_DIVIDEND',
-            'config_value': '0.5',
+            'config_value': '0.35',
             'config_type': 'float',
             'category': 'C权重',
-            'description': '股息率因子在评分中的权重。默认0.5强调分红收益。提高权重更重视股息率',
-            'default_value': '0.5',
+            'description': '股息率因子在评分中的权重。默认0.35强调分红收益',
+            'default_value': '0.35',
             'min_value': '0',
             'max_value': '1.0',
             'unit': '-',
         },
         {
             'config_key': 'WEIGHT_VOL',
-            'config_value': '0.3',
+            'config_value': '0.25',
             'config_type': 'float',
             'category': 'C权重',
-            'description': '波动率因子在评分中的权重。默认0.3强调低波动。提高权重更重视稳定性',
-            'default_value': '0.3',
+            'description': '波动率因子在评分中的权重。默认0.25强调低波动',
+            'default_value': '0.25',
             'min_value': '0',
             'max_value': '1.0',
             'unit': '-',
         },
         {
             'config_key': 'WEIGHT_STABILITY',
-            'config_value': '0.2',
+            'config_value': '0.15',
             'config_type': 'float',
             'category': 'C权重',
-            'description': '分红稳定性因子在评分中的权重。默认0.2作为辅助因子。提高权重更重视持续分红能力',
-            'default_value': '0.2',
+            'description': '分红稳定性因子在评分中的权重。默认0.15作为辅助因子',
+            'default_value': '0.15',
             'min_value': '0',
             'max_value': '1.0',
             'unit': '-',
         },
+        # v8.4新增：成长因子权重
+        {
+            'config_key': 'WEIGHT_GROWTH',
+            'config_value': '0.25',
+            'config_type': 'float',
+            'category': 'C权重',
+            'description': '成长因子在评分中的权重（v8.4新增）。综合衡量净利润增长率、PEG、ROE趋势',
+            'default_value': '0.25',
+            'min_value': '0',
+            'max_value': '0.5',
+            'unit': '-',
+        },
         
-        # D类：v7.2质量因子增强参数
+        # D类：v8.4.1质量因子增强参数
         {
             'config_key': 'ENABLE_PROFIT_GROWTH_FILTER',
             'config_value': 'true',
             'config_type': 'bool',
             'category': 'D质量',
-            'description': '是否启用近3年净利润增速筛选。防止周期股美化报表，验证盈利能力持续性',
+            'description': '是否启用近3年净利润增速筛选（v8.4.1启用）。过滤负增长股票，确保盈利能力持续性',
             'default_value': 'true',
             'min_value': None,
             'max_value': None,
             'unit': '-',
         },
         {
-            'config_key': 'MIN_PROFIT_GROWTH_3Y',
+            'config_key': 'MIN_PROFIT_GROWTH',
             'config_value': '0',
             'config_type': 'float',
             'category': 'D质量',
-            'description': '最低近3年净利润CAGR。0表示正值即可，负值表示容忍小幅下滑。建议值：严格型5%，均衡型0%，宽泛型-5%',
+            'description': '最低3年净利润CAGR（%）（v8.4.1新增）。设为0过滤负增长，5表示要求稳定增长。无数据默认放行',
             'default_value': '0',
             'min_value': '-20',
             'max_value': '50',
@@ -280,7 +318,7 @@ class ConfigService:
             'config_value': 'true',
             'config_type': 'bool',
             'category': 'D质量',
-            'description': '是否启用经营现金流质量筛选。防止现金分红靠借款，验证分红可持续性',
+            'description': '是否启用经营现金流质量筛选。防止现金分红靠借款，验证分红可持续性。⭐ v8.5已实现',
             'default_value': 'true',
             'min_value': None,
             'max_value': None,
@@ -302,7 +340,7 @@ class ConfigService:
             'config_value': 'true',
             'config_type': 'bool',
             'category': 'D质量',
-            'description': '是否启用股权结构稳定性筛选。确保大股东与中小股东利益绑定',
+            'description': '是否启用股权结构稳定性筛选。确保大股东与中小股东利益绑定。⭐ v8.5已实现',
             'default_value': 'true',
             'min_value': None,
             'max_value': None,
@@ -489,6 +527,7 @@ class ConfigService:
             'A筛选': [],
             'B风控': [],
             'C权重': [],
+            'D质量': [],
         }
         
         for key in self._cache:
@@ -549,10 +588,10 @@ class ConfigService:
         # 权重和检查（C类参数特殊校验）
         if key.startswith('WEIGHT_'):
             weight_sum = 0.0
-            for k in ['WEIGHT_DIVIDEND', 'WEIGHT_VOL', 'WEIGHT_STABILITY']:
+            for k in ['WEIGHT_DIVIDEND', 'WEIGHT_VOL', 'WEIGHT_STABILITY', 'WEIGHT_GROWTH']:
                 if k == key:
                     weight_sum += num_value
-                else:
+                elif k in self._cache:
                     weight_sum += self.get_float(k)
             
             if abs(weight_sum - 1.0) > 0.001:
@@ -651,7 +690,7 @@ class ConfigService:
                     pass
         
         # 特殊处理：权重和校验（需要在所有权重都更新后检查）
-        weight_keys = ['WEIGHT_DIVIDEND', 'WEIGHT_VOL', 'WEIGHT_STABILITY']
+        weight_keys = ['WEIGHT_DIVIDEND', 'WEIGHT_VOL', 'WEIGHT_STABILITY', 'WEIGHT_GROWTH']
         if any(k in configs for k in weight_keys):
             # 计算新的权重和
             weight_sum = 0.0

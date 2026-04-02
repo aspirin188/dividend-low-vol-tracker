@@ -1,9 +1,14 @@
 """
-两因子评分服务 — 红利低波跟踪系统
+四因子评分服务 — 红利低波跟踪系统
 
 评分模型：
-  综合评分 = 股息率归一化 × 60% + (1 - 波动率归一化) × 40%
+  综合评分 = 股息率归一化 × W1 + (1 - 波动率归一化) × W2 + 稳定性归一化 × W3 + 成长因子 × W4
   归一化方式：min-max，映射到 0-100 分
+
+v8.4 重大升级：
+  - 三因子 → 四因子：新增成长因子（净利润增长率、PEG、ROE趋势）
+  - 成长红利预设策略
+  - 新增 growth_factor 字段（0-100分）
 
 v6.20 重大改造：
   - 参数化配置：所有硬编码参数改为从配置服务读取
@@ -194,36 +199,60 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     MAX_DEBT_RATIO = config.get_float('MAX_DEBT_RATIO')
     MAX_DEBT_RATIO_FINANCE = config.get_float('MAX_DEBT_RATIO_FINANCE')
     
-    # 排除 ST
-    df = df[~df['name'].str.contains('ST', case=False, na=False)]
-
     # 确保关键字段为数值类型
     num_cols = ['dividend_yield_ttm', 'market_cap', 'annual_vol', 'basic_eps', 'dividend_years', 'roe', 'debt_ratio']
     df = df.copy()
-    for col in num_cols:
+    
+    # 只处理存在的列
+    existing_num_cols = [col for col in num_cols if col in df.columns]
+    for col in existing_num_cols:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # 硬性条件筛选
-    df = df[
-        (df['dividend_yield_ttm'] >= MIN_DIVIDEND_YIELD) &
-        (df['dividend_yield_ttm'] <= MAX_DIVIDEND_YIELD) &
-        (df['market_cap'] >= MIN_MARKET_CAP) &
-        (df['basic_eps'] > MIN_EPS) &
-        (df['annual_vol'].notna()) &
-        (df['dividend_yield_ttm'].notna()) &
-        (df['market_cap'].notna()) &
-        (df['basic_eps'].notna()) &
-        (df['dividend_years'] >= MIN_DIVIDEND_YEARS) &
-        (df['roe'].notna()) &
-        (df['roe'] >= MIN_ROE)
-    ].copy()
+    # 硬性条件筛选 - 检查列是否存在
+    conditions = []
+    
+    # 排除 ST
+    if 'name' in df.columns:
+        df = df[~df['name'].str.contains('ST', case=False, na=False)]
+    
+    # 基础条件
+    if 'dividend_yield_ttm' in df.columns:
+        conditions.append((df['dividend_yield_ttm'] >= MIN_DIVIDEND_YIELD) &
+                         (df['dividend_yield_ttm'] <= MAX_DIVIDEND_YIELD) &
+                         (df['dividend_yield_ttm'].notna()))
+    
+    if 'market_cap' in df.columns:
+        conditions.append((df['market_cap'] >= MIN_MARKET_CAP) &
+                         (df['market_cap'].notna()))
+    
+    if 'basic_eps' in df.columns:
+        conditions.append((df['basic_eps'] > MIN_EPS) &
+                         (df['basic_eps'].notna()))
+    
+    if 'annual_vol' in df.columns:
+        conditions.append(df['annual_vol'].notna())
+    
+    if 'dividend_years' in df.columns:
+        conditions.append(df['dividend_years'] >= MIN_DIVIDEND_YEARS)
+    
+    if 'roe' in df.columns:
+        conditions.append((df['roe'].notna()) &
+                         (df['roe'] >= MIN_ROE))
+    
+    # 应用所有条件
+    if conditions:
+        df = df[pd.Series(conditions[0])]
+        for cond in conditions[1:]:
+            df = df[cond]
+        df = df.copy()
 
     # 股利支付率筛选（允许为空但不超过上限）
-    df.loc[:, 'payout_ratio'] = pd.to_numeric(df['payout_ratio'], errors='coerce')
-    df = df[
-        (df['payout_ratio'].isna()) |
-        (df['payout_ratio'] <= MAX_PAYOUT_RATIO)
-    ].copy()
+    if 'payout_ratio' in df.columns:
+        df.loc[:, 'payout_ratio'] = pd.to_numeric(df['payout_ratio'], errors='coerce')
+        df = df[
+            (df['payout_ratio'].isna()) |
+            (df['payout_ratio'] <= MAX_PAYOUT_RATIO)
+        ].copy()
 
     # v7.1修复：恢复资产负债率筛选功能
     # 数据来源：financial_calculator.calculate_debt_ratio_batch()
@@ -233,14 +262,21 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     # 先归并行业
     industry_norms = df['industry'].fillna('').apply(normalize_industry)
     
+    # v8.1修复：对行业为"其他"的股票，根据名称补充金融行业判断
+    _FINANCE_KEYWORDS = {'银行', '保险', '证券', '信托', '租赁', '期货'}
+    def _is_finance_by_name(idx):
+        name = str(df.loc[idx, 'name']) if 'name' in df.columns and pd.notna(df.loc[idx, 'name']) else ''
+        return any(kw in name for kw in _FINANCE_KEYWORDS)
+    
     def check_debt_ratio(idx):
         """检查资产负债率是否符合要求"""
         debt = df.loc[idx, 'debt_ratio']
         if pd.isna(debt):
-            # 数据缺失，给出警告但不完全过滤
-            # 这样可以避免因数据源问题导致筛选结果过少
-            return True  # 允许通过
+            return True
         industry = industry_norms.loc[idx]
+        # v8.1修复：行业为"其他"时，通过名称识别金融股
+        if industry == '其他' and _is_finance_by_name(idx):
+            return debt <= MAX_DEBT_RATIO_FINANCE
         if industry in FINANCE_INDUSTRIES:
             return debt <= MAX_DEBT_RATIO_FINANCE
         else:
@@ -249,11 +285,19 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
     df = df[df.index.map(check_debt_ratio)].copy()
 
     # v7.2新增：质量因子增强筛选
-    
+
     # 1. 净利润增速筛选
-    if config.get('ENABLE_PROFIT_GROWTH_FILTER'):
-        min_profit_growth = config.get_float('MIN_PROFIT_GROWTH_3Y') / 100  # 转换为小数
-        
+    try:
+        enable_growth_filter = config.get('ENABLE_PROFIT_GROWTH_FILTER') == 'True'
+    except KeyError:
+        enable_growth_filter = False
+
+    if enable_growth_filter and 'profit_growth_3y' in df.columns:
+        try:
+            min_profit_growth = config.get_float('MIN_PROFIT_GROWTH') / 100  # 转换为小数
+        except KeyError:
+            min_profit_growth = 0.0  # 默认值
+
         def check_profit_growth(idx):
             """检查近3年净利润增速"""
             growth = df.loc[idx, 'profit_growth_3y']
@@ -262,11 +306,19 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
             return growth >= min_profit_growth
         
         df = df[df.index.map(check_profit_growth)].copy()
-    
+
     # 2. 现金流质量筛选
-    if config.get('ENABLE_CASHFLOW_QUALITY_FILTER'):
-        min_cashflow_ratio = config.get_float('MIN_CASHFLOW_PROFIT_RATIO')
-        
+    try:
+        enable_cashflow_filter = config.get('ENABLE_CASHFLOW_QUALITY_FILTER') == 'True'
+    except KeyError:
+        enable_cashflow_filter = False
+
+    if enable_cashflow_filter and 'cashflow_profit_ratio' in df.columns:
+        try:
+            min_cashflow_ratio = config.get_float('MIN_CASHFLOW_PROFIT_RATIO')
+        except KeyError:
+            min_cashflow_ratio = 0.5  # 默认值
+
         def check_cashflow_quality(idx):
             """检查现金流质量"""
             ratio = df.loc[idx, 'cashflow_profit_ratio']
@@ -277,8 +329,16 @@ def filter_stocks(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFram
         df = df[df.index.map(check_cashflow_quality)].copy()
     
     # 3. 股权结构稳定性筛选
-    if config.get('ENABLE_SHAREHOLDER_STABILITY_FILTER'):
-        min_shareholder_ratio = config.get_float('MIN_TOP1_SHAREHOLDER_RATIO')
+    try:
+        enable_shareholder_filter = config.get('ENABLE_SHAREHOLDER_STABILITY_FILTER') == 'True'
+    except KeyError:
+        enable_shareholder_filter = False
+
+    if enable_shareholder_filter and 'top1_shareholder_ratio' in df.columns:
+        try:
+            min_shareholder_ratio = config.get_float('MIN_TOP1_SHAREHOLDER_RATIO')
+        except KeyError:
+            min_shareholder_ratio = 0.2  # 默认值
         
         def check_shareholder_stability(idx):
             """检查股权结构稳定性"""
@@ -303,7 +363,22 @@ def min_max_normalize(values: np.ndarray, target: float) -> float:
     边界情况：
     - 空列表或单个元素：返回 0.5
     - 所有值相同：返回 0.5
+    
+    v8.0修复：增加数据类型检查，确保处理数值类型
     """
+    # v8.0: 确保values是数值类型
+    try:
+        values = np.array(values, dtype=float)
+        target = float(target)
+    except (ValueError, TypeError) as e:
+        # 转换失败，返回默认值
+        return 0.5
+    
+    if len(values) <= 1:
+        return 0.5
+
+    # 移除NaN值
+    values = values[~np.isnan(values)]
     if len(values) <= 1:
         return 0.5
 
@@ -313,6 +388,10 @@ def min_max_normalize(values: np.ndarray, target: float) -> float:
     if min_val == max_val:
         return 0.5
 
+    # 检查target是否在范围内
+    if target < min_val or target > max_val:
+        return 0.5
+    
     return (target - min_val) / (max_val - min_val)
 
 
@@ -328,14 +407,12 @@ def min_max_normalize(values: np.ndarray, target: float) -> float:
 
 def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataFrame:
     """
-    三因子评分：股息率 X% + 波动率(取反) Y% + 分红稳定性 Z%。
+    四因子评分：股息率 × W1 + 波动率(取反) × W2 + 分红稳定性 × W3 + 成长因子 × W4。
     
+    v8.4升级：三因子→四因子，新增成长因子
     v7.0升级：稳定性评分增强（分红年数 + 支付率稳定性）
     v6.20改造：权重从配置服务读取
     v6.10升级：两因子 → 三因子
-    - 股息率：min-max归一化
-    - 波动率：min-max归一化后取反（越低越好）
-    - 分红稳定性：直接映射（3年=60分, 4年=80分, 5年+=100分）
     """
     if df.empty:
         return df
@@ -347,14 +424,29 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
     WEIGHT_DIVIDEND = config.get_float('WEIGHT_DIVIDEND')
     WEIGHT_VOL = config.get_float('WEIGHT_VOL')
     WEIGHT_STABILITY = config.get_float('WEIGHT_STABILITY')
+    WEIGHT_GROWTH = config.get_float('WEIGHT_GROWTH')  # v8.4新增
 
-    div_values = df['dividend_yield_ttm'].values
-    vol_values = df['annual_vol'].values
-    div_years_values = df['dividend_years'].values
+    # v8.0修复: 强制转换关键字段为数值类型
+    df = df.copy()
+    numeric_cols = ['dividend_yield_ttm', 'annual_vol', 'dividend_years']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # 过滤掉包含NaN的行
+    df = df[df['dividend_yield_ttm'].notna() & df['annual_vol'].notna()].copy()
+    
+    if df.empty:
+        return df
+
+    div_values = df['dividend_yield_ttm'].values.astype(float)
+    vol_values = df['annual_vol'].values.astype(float)
+    div_years_values = df['dividend_years'].values.astype(float)
 
     div_norms = []
     vol_norms = []
     stability_scores = []
+    growth_factors = []  # v8.4新增
     
     # v7.0新增：支付率稳定性评分
     from server.services.fetcher import calculate_payout_stability_score
@@ -367,7 +459,7 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
         # 波动率归一化
         v_norm = min_max_normalize(vol_values, vol_values[i])
         
-        # 分红稳定性评分（基础版：按年数）
+        # 分红稳定性评分
         years = div_years_values[i]
         if years >= 5:
             years_score = 100.0
@@ -378,35 +470,44 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
         else:
             years_score = 0.0
         
-        # v7.0新增：支付率稳定性评分
+        # 支付率稳定性
         code = df.iloc[i]['code']
         payout_3y_avg, payout_stability = calculate_payout_stability_score(code)
         
         payout_3y_avgs.append(payout_3y_avg)
         payout_stability_scores.append(payout_stability)
         
-        # v7.0: 稳定性总分 = 年数分 × 0.6 + 支付率稳定性分 × 0.4
         s_score = years_score * 0.6 + payout_stability * 0.4
 
         div_norms.append(d_norm)
         vol_norms.append(v_norm)
         stability_scores.append(s_score)
+        
+        # v8.4新增：成长因子计算
+        growth_factor = _calculate_growth_factor(
+            df.iloc[i].get('profit_growth_3y'),
+            df.iloc[i].get('pe'),
+            df.iloc[i].get('roe_trend'),
+        )
+        growth_factors.append(growth_factor)
 
     df = df.copy()
     df['div_norm'] = div_norms
     df['vol_norm'] = vol_norms
     df['stability_score'] = stability_scores
-    df['vol_score'] = [1.0 - v for v in vol_norms]  # 波动率越低越好
+    df['vol_score'] = [1.0 - v for v in vol_norms]
+    df['growth_factor'] = growth_factors  # v8.4新增
     
-    # v7.0新增：保存支付率相关字段
+    # v7.0新增
     df['payout_3y_avg'] = payout_3y_avgs
     df['payout_stability_score'] = payout_stability_scores
 
-    # 综合评分 0-100
+    # 四因子综合评分 0-100
     df['composite_score'] = (
         df['div_norm'] * WEIGHT_DIVIDEND +
         df['vol_score'] * WEIGHT_VOL +
-        df['stability_score'] / 100.0 * WEIGHT_STABILITY
+        df['stability_score'] / 100.0 * WEIGHT_STABILITY +
+        df['growth_factor'] / 100.0 * WEIGHT_GROWTH
     ) * 100
     df['composite_score'] = df['composite_score'].round(2)
 
@@ -415,6 +516,74 @@ def calculate_scores(df: pd.DataFrame, config: ConfigService = None) -> pd.DataF
     df['rank'] = range(1, len(df) + 1)
 
     return df
+
+
+def _calculate_growth_factor(profit_growth_3y, pe, roe_trend):
+    """
+    计算成长因子综合得分（v8.4新增）
+    
+    三个子指标加权：
+    - 净利润增长率评分 (40%)
+    - PEG评分 (30%)
+    - ROE趋势评分 (30%)
+    
+    Args:
+        profit_growth_3y: 近3年净利润CAGR（%），如 8.5
+        pe: 市盈率
+        roe_trend: ROE趋势变化（百分点），如 2.5
+    
+    Returns:
+        float: 成长因子得分 0-100
+    """
+    # 子指标1：净利润增长率评分
+    if profit_growth_3y is not None and not pd.isna(profit_growth_3y):
+        growth = float(profit_growth_3y)
+        if growth >= 15:
+            growth_score = 100
+        elif growth >= 10:
+            growth_score = 80
+        elif growth >= 5:
+            growth_score = 60
+        elif growth >= 0:
+            growth_score = 40
+        else:
+            growth_score = 0
+    else:
+        growth_score = 30  # 无数据给中等分
+    
+    # 子指标2：PEG评分
+    if profit_growth_3y is not None and not pd.isna(profit_growth_3y) and pe is not None and not pd.isna(pe) and pe > 0 and profit_growth_3y > 0:
+        peg = float(pe) / float(profit_growth_3y)
+        if peg <= 0.5:
+            peg_score = 100
+        elif peg <= 0.8:
+            peg_score = 80
+        elif peg <= 1.0:
+            peg_score = 60
+        elif peg <= 1.5:
+            peg_score = 30
+        else:
+            peg_score = 0
+    else:
+        peg_score = 30  # 无数据给中等分
+    
+    # 子指标3：ROE趋势评分
+    if roe_trend is not None and not pd.isna(roe_trend):
+        trend = float(roe_trend)
+        if trend > 2:
+            roe_trend_score = 100
+        elif trend > 0:
+            roe_trend_score = 70
+        elif trend > -2:
+            roe_trend_score = 30
+        else:
+            roe_trend_score = 0
+    else:
+        roe_trend_score = 30  # 无数据给中等分
+    
+    # 加权综合
+    total = growth_score * 0.4 + peg_score * 0.3 + roe_trend_score * 0.3
+    return round(total, 2)
 
 
 # ============================================================
@@ -462,7 +631,8 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
             'price_percentile', 'payout_3y_avg', 'data_date', 'updated_at',
             'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio',
             'strike_zone_score', 'strike_zone_rating', 'strike_zone',
-            'ma250', 'price_vs_ma_pct', 'ma_slope', 'signal', 'signal_level', 'ma_score'
+            'ma250', 'price_vs_ma_pct', 'ma_slope', 'signal', 'signal_level', 'ma_score',
+            'growth_factor', 'peg', 'roe_trend',  # v8.4新增
         ])
 
     # 行业归并
@@ -474,8 +644,17 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
     # 拼音首字母缩写
     pinyin_abbrs = df['name'].apply(get_pinyin_abbr)
 
-    # 确保数值字段是数值类型（v6.12修复）
-    for col in ['dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 'price_percentile', 'payout_3y_avg', 'profit_growth_3y', 'cashflow_profit_ratio', 'top1_shareholder_ratio', 'strike_zone_score', 'ma250', 'price_vs_ma_pct', 'ma_slope', 'signal_level', 'ma_score']:
+    # 确保数值字段是数值类型（v6.12修复，v8.0增强）
+    numeric_cols = [
+        'dividend_yield_ttm', 'annual_vol', 'market_cap', 'payout_ratio', 
+        'basic_eps', 'price', 'pe', 'pb', 'roe', 'debt_ratio', 
+        'price_percentile', 'payout_3y_avg', 'profit_growth_3y', 
+        'cashflow_profit_ratio', 'top1_shareholder_ratio', 
+        'strike_zone_score', 'ma250', 'ma20', 'ma60', 'current_price',
+        'price_vs_ma_pct', 'ma_slope', 'signal_level', 'ma_score',
+        'trend_strength', 'growth_factor', 'peg', 'roe_trend',  # v8.4新增
+    ]
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -495,7 +674,7 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'pe': df['pe'].round(2),
         'pb': df['pb'].round(2),
         'pinyin_abbr': pinyin_abbrs,
-        'dividend_years': df['dividend_years'].astype(int),
+        'dividend_years': df['dividend_years'].fillna(0).astype(int),
         'roe': df['roe'].round(2),
         'debt_ratio': df['debt_ratio'].round(2),
         'price_percentile': df['price_percentile'].round(2),
@@ -517,10 +696,14 @@ def prepare_results(df: pd.DataFrame, data_date: str = None) -> pd.DataFrame:
         'trend': df['trend'] if 'trend' in df.columns else None,  # v7.3新增
         'trend_strength': df['trend_strength'] if 'trend_strength' in df.columns else None,  # v7.3新增
         'signal': df['signal'] if 'signal' in df.columns else None,
-        'signal_level': df['signal_level'].astype(int) if 'signal_level' in df.columns else None,
+        'signal_level': df['signal_level'].fillna(0).astype(int) if 'signal_level' in df.columns else None,
         'signal_type': df['signal_type'] if 'signal_type' in df.columns else None,  # v7.3新增
         'action': df['action'] if 'action' in df.columns else None,  # v7.3新增
         'ma_score': df['ma_score'] if 'ma_score' in df.columns else None,
+        # v8.4新增：成长因子
+        'growth_factor': df['growth_factor'].round(2) if 'growth_factor' in df.columns else None,
+        'peg': df['peg'].round(2) if 'peg' in df.columns else None,
+        'roe_trend': df['roe_trend'].round(2) if 'roe_trend' in df.columns else None,
         'data_date': data_date,
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     })
